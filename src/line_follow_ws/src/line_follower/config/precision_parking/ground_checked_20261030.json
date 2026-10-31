@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "status": "Ground projection fitted; stopping profiles require separate validation",
+  "calibration": {
+    "width": 640,
+    "height": 480,
+    "points": [
+      [
+        255.5,
+        0.47
+      ],
+      [
+        345.5,
+        0.19
+      ],
+      [
+        443.0,
+        0.1
+      ]
+    ],
+    "error_m": 0.02,
+    "validated": false
+  },
+  "controller": {
+    "max_speed": 0.3,
+    "calibrated_speed": 0.3,
+    "deceleration": 0.2,
+    "reaction_time": 0.15,
+    "stop_margin": 0.075,
+    "front_offset": 0.155
+  },
+  "detector": {
+    "saturation_min": 35,
+    "value_min": 80,
+    "confirm_frames": 3
+  },
+  "ground_projection": {
+    "width": 640,
+    "height": 480,
+    "homography": [
+      [
+        1.0,
+        0.0,
+        -340.5
+      ],
+      [
+        0.0,
+        -0.45784440290729594,
+        429.4079449372339
+      ],
+      [
+        0.0,
+        8.890323406527243,
+        -1607.002988683968
+      ]
+    ],
+    "image_hull": [
+      [
+        639.0,
+        438.1308288574219
+      ],
+      [
+        0.0,
+        438.1308288574219
+      ],
+      [
+        0.0,
+        236.34201049804688
+      ],
+      [
+        639.0,
+        236.34201049804688
+      ]
+    ],
+    "front_offset_m": 0.155,
+    "front_half_width_m": 0.08,
+    "range_m": [
+      0.1,
+      0.65
+    ],
+    "error_m": 0.02,
+    "max_fit_error_m": 0.01,
+    "max_lateral_extrapolation_m": 0.0,
+    "validated": true,
+    "pixel_space": "raw",
+    "record": {
+      "training_points": 10,
+      "training_max_m": 2.2887833992611187e-16,
+      "holdout_points": 3,
+      "holdout_max_m": 0.012312566607472725,
+      "model_error_m": 0.02,
+      "survey_sha256": "e6cb3757b838aa4cd2f10c0d22cfdcf263d1374b18eea96df57c0a987b35ba23"
+    },
+    "camera_height_m": 0.1,
+    "pitch_deg": 27.248098,
+    "focal_px": 308.181818,
+    "cy_px": 339.469787,
+    "cx_px": 340.5
+  },
+  "braking_profile_data": {
+    "schema_version": 1,
+    "status": "Candidate only: no policy has independent physical validation",
+    "profiles": {
+      "zero": {
+        "sequence": "zero",
+        "points": [
+          [
+            0.298,
+            0.1440250415000001
+          ],
+          [
+            0.439,
+            0.21546954250000203
+          ],
+          [
+            0.578,
+            0.28188353050000015
+          ],
+          [
+            0.765,
+            0.3859813945000026
+          ]
+        ],
+        "reserve_m": 0.02,
+        "validated": false,
+        "evidence_id": "B1_20261027",
+        "evidence": [
+          {
+            "file": "analysis/brake_probe_2026-10-27/b1_030_20261027_132423.csv",
+            "sha256": "292a6e25b49a27be278b30e799da518b5df626408ca98f6a3f21817275b44f2e",
+            "zero_t": 10.310077
+          },
+          {
+            "file": "analysis/brake_probe_2026-10-27/b1_030_20261027_132423.csv",
+            "sha256": "292a6e25b49a27be278b30e799da518b5df626408ca98f6a3f21817275b44f2e",
+            "zero_t": 95.312699
+          },
+          {
+            "file": "analysis/brake_probe_2026-10-27/b1_060_20261027_132658.csv",
+            "sha256": "df7900c62c0504cfde65ece6800a0074ae1dd946396e6969b8548f48bfd77da6",
+            "zero_t": 36.808197
+          },
+          {
+            "file": "analysis/brake_probe_2026-10-27/b1_080_20261027_132843.csv",
+            "sha256": "3eecb06c15ee387aa513711af4d8e5b53708a8ad4f292dbc1d9afa54ab5ed642",
+            "zero_t": 32.718011
+          }
+        ],
+        "validation": {
+          "trials": 0,
+          "no_reverse": false,
+          "physical_distance_checked": false
+        }
+      },
+      "hybrid": {
+        "sequence": "zero_negative_zero",
+        "points": [],
+        "reserve_m": 0.02,
+        "validated": false,
+        "evidence_id": "NO_COMPLETE_SEQUENCE_DATA",
+        "validation": {
+          "trials": 0,
+          "no_reverse": false,
+          "physical_distance_checked": false
+        }
+      }
+    },
+    "hybrid_control": {
+      "negative_cmd": -0.05,
+      "tail_entry_speed": 0.25,
+      "release_guard": 0.06,
+      "fast_decel_bound": null,
+      "release_delay_s": null,
+      "max_pulse_s": 0.1,
+      "response_lag_s": null
+    }
+  }
+}
