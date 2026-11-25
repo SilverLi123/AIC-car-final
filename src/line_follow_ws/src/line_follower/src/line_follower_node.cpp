@@ -52,6 +52,49 @@ struct RedAvoidRuntime
   bool in_corridor{false};
   double risk{0.0};
   bool very_close{false};
+
+  // 红障绕行方向锁存（跨帧保留，不随 reset_frame() 清零）。
+  bool dir_locked{false};
+  double locked_side_sign{0.0};
+  int dir_clear_frames{0};
+
+  void reset_frame()
+  {
+    valid = false;
+    red_line_detected = false;
+    is_red_line = false;
+    red_line_bbox_img = cv::Rect{};
+    bbox_img = cv::Rect{};
+    center_img = cv::Point2d{};
+    bottom_img = cv::Point2d{};
+    aspect_ratio = 0.0;
+    contour_area_ratio = 0.0;
+    bottom_ratio = 0.0;
+    in_corridor = false;
+    risk = 0.0;
+    very_close = false;
+  }
+
+  void reset_lock()
+  {
+    dir_locked = false;
+    locked_side_sign = 0.0;
+    dir_clear_frames = 0;
+  }
+
+  void decay_lock(bool keep_enabled, int clear_frames_req)
+  {
+    if (!keep_enabled) {
+      reset_lock();
+      return;
+    }
+    if (dir_locked) {
+      dir_clear_frames++;
+      if (dir_clear_frames >= std::max(1, clear_frames_req)) {
+        reset_lock();
+      }
+    }
+  }
 };
 
 RedAvoidRuntime g_red_avoid;
@@ -231,6 +274,14 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("red_line_fallback_direction", -1);
   this->declare_parameter("red_line_soft_yaw", 0.35);
   this->declare_parameter("red_line_speed", 0.12);
+
+  // 实验功能（默认关闭）：红色禁行区（空心框/竖条纹）聚类合并 + 绕行方向锁存。
+  this->declare_parameter("enable_red_zone_lock", false);
+  this->declare_parameter("red_zone_close_kernel_w", 15);
+  this->declare_parameter("red_zone_close_kernel_h", 9);
+  this->declare_parameter("red_zone_min_width_ratio", 0.16);
+  this->declare_parameter("red_zone_aspect_ratio_min", 1.4);
+  this->declare_parameter("red_zone_lock_clear_frames", 6);
 
   // 丢线不停车：超过 line_lost_stop_time 只切换 LOST 状态，仍低速前进。
   this->declare_parameter("line_lost_stop_time", 0.8);
@@ -413,6 +464,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     red_right_votes_ = 0;
     red_turning_ = false;
     red_turn_end_time_ = this->now();
+    g_red_avoid.reset_lock();
 
     intersection_active_ = false;
     intersection_end_time_ = this->now();
@@ -431,6 +483,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
   // 暂停后清空连续弯状态，重新启动时由当前画面重新判断，避免继承旧状态。
   if (!start_enabled_) {
     g_curve_assist = CurveAssistRuntime{};
+    g_red_avoid.reset_lock();
     if (reverse_brake_active_) {
       reverse_brake_active_ = false;
       publish_cmd_vel(0.0, 0.0, true);
@@ -515,6 +568,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   if (!start_enabled_) {
     // 停车等待期间不累计连续弯判定，避免起步继承静止画面的旧状态。
     g_curve_assist = CurveAssistRuntime{};
+    g_red_avoid.reset_lock();
 
     static rclcpp::Time last_log_time = this->now();
     rclcpp::Time current_time = this->now();
@@ -699,6 +753,10 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       red_left_votes_ = 0;
       red_right_votes_ = 0;
 
+      g_red_avoid.decay_lock(
+        this->get_parameter("enable_red_zone_lock").as_bool(),
+        static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
+
       if (soft_red_enabled) {
         red_turning_ = false;
       } else if (now >= red_turn_end_time_) {
@@ -707,9 +765,11 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     }
   } else {
     last_red_overlay_valid_ = false;
-    g_red_avoid.valid = false;
-    g_red_avoid.red_line_detected = false;
-    g_red_avoid.is_red_line = false;
+    g_red_avoid.reset_frame();
+
+    g_red_avoid.decay_lock(
+      enable_red_filter_ && this->get_parameter("enable_red_zone_lock").as_bool(),
+      static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
 
     if (soft_red_enabled) {
       red_left_votes_ = 0;
@@ -1647,8 +1707,8 @@ bool LineFollowerNode::detect_red(
 {
   side_sign = 0.0;
 
-  // 每次检测先清空当前帧结果。
-  g_red_avoid = RedAvoidRuntime{};
+  // 每次检测先清空当前帧几何结果（保留 dir_locked 等跨帧锁存状态）。
+  g_red_avoid.reset_frame();
 
   if (!enable_red_filter_ || frame_bgr.empty()) {
     return false;
@@ -1778,6 +1838,57 @@ bool LineFollowerNode::detect_red(
       1.0,
       static_cast<double>(mask.total()));
 
+  const bool red_zone_lock_enabled =
+    this->get_parameter("enable_red_zone_lock").as_bool();
+
+  bool zone_found = false;
+  cv::Rect best_zone_box{};
+  double best_zone_area = 0.0;
+
+  if (red_zone_lock_enabled) {
+    const int zone_kw = std::max(
+      1, static_cast<int>(this->get_parameter("red_zone_close_kernel_w").as_int()));
+    const int zone_kh = std::max(
+      1, static_cast<int>(this->get_parameter("red_zone_close_kernel_h").as_int()));
+    const double zone_min_w_ratio = clamp(
+      this->get_parameter("red_zone_min_width_ratio").as_double(), 0.0, 1.0);
+    const double zone_aspect_min = std::max(
+      0.5, this->get_parameter("red_zone_aspect_ratio_min").as_double());
+
+    cv::Mat zone_mask;
+    const cv::Mat zone_kernel =
+      cv::getStructuringElement(cv::MORPH_RECT, cv::Size(zone_kw, zone_kh));
+    cv::morphologyEx(
+      mask, zone_mask, cv::MORPH_CLOSE, zone_kernel, cv::Point(-1, -1), 1);
+
+    std::vector<std::vector<cv::Point>> zone_contours;
+    cv::findContours(
+      zone_mask, zone_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    for (const auto & zc : zone_contours) {
+      const double z_area = cv::contourArea(zc);
+      if (z_area <= 0.0 || (z_area / roi_area) < cone_area_ratio_min) {
+        continue;
+      }
+      const cv::Rect z_box = cv::boundingRect(zc);
+      if (z_box.width <= 0 || z_box.height <= 0) {
+        continue;
+      }
+      const double z_aspect =
+        static_cast<double>(z_box.width) / static_cast<double>(z_box.height);
+      if (z_aspect >= zone_aspect_min &&
+          static_cast<double>(z_box.width) >=
+            static_cast<double>(frame_bgr.cols) * zone_min_w_ratio)
+      {
+        if (z_area > best_zone_area) {
+          best_zone_area = z_area;
+          best_zone_box = z_box;
+          zone_found = true;
+        }
+      }
+    }
+  }
+
   // 关键变化：
   // 不再“先找最大红色，再判断是不是红线”。
   // 而是逐个轮廓先做红线过滤，再从剩余候选里寻找最大的红锥。
@@ -1837,8 +1948,16 @@ bool LineFollowerNode::detect_red(
     }
   }
 
-  // 记录横向红色停车线，供调试显示。
-  if (best_line_index >= 0) {
+  // 记录横向红色停车线/禁行区，供调试显示。
+  if (zone_found) {
+    g_red_avoid.red_line_detected = true;
+    g_red_avoid.red_line_bbox_img =
+      cv::Rect(
+        best_zone_box.x,
+        best_zone_box.y + roi_top,
+        best_zone_box.width,
+        best_zone_box.height);
+  } else if (best_line_index >= 0) {
     const cv::Rect line_box_roi =
       cv::boundingRect(
         contours[static_cast<size_t>(best_line_index)]);
@@ -1852,23 +1971,20 @@ bool LineFollowerNode::detect_red(
         line_box_roi.height);
   }
 
-  // 优先处理红锥；没有红锥但检测到红色停车线时，停车线同样进入避障。
+  // 合并禁行区优先于零散碎片；否则优先处理红锥，其次普通红线。
   const bool use_red_line =
-    best_cone_index < 0 && best_line_index >= 0;
+    zone_found || (best_cone_index < 0 && best_line_index >= 0);
 
-  if (best_cone_index < 0 && best_line_index < 0) {
+  if (!zone_found && best_cone_index < 0 && best_line_index < 0) {
     return false;
   }
 
-  const int selected_index =
-    use_red_line ? best_line_index : best_cone_index;
-
-  const double selected_area =
-    use_red_line ? best_line_area : best_cone_area;
-
-  const cv::Rect box =
+  const cv::Rect box = zone_found ? best_zone_box :
     cv::boundingRect(
-      contours[static_cast<size_t>(selected_index)]);
+      contours[static_cast<size_t>(use_red_line ? best_line_index : best_cone_index)]);
+
+  const double selected_area = zone_found ? best_zone_area :
+    (use_red_line ? best_line_area : best_cone_area);
 
   const double aspect_ratio =
     static_cast<double>(box.width) /
@@ -1953,6 +2069,18 @@ bool LineFollowerNode::detect_red(
       cross >= 0.0 ?
       1.0 :
       -1.0;
+  }
+
+  if (red_zone_lock_enabled) {
+    if (!g_red_avoid.dir_locked) {
+      g_red_avoid.dir_locked = true;
+      g_red_avoid.locked_side_sign = side_sign;
+    } else {
+      side_sign = g_red_avoid.locked_side_sign;
+    }
+    g_red_avoid.dir_clear_frames = 0;
+  } else {
+    g_red_avoid.reset_lock();
   }
 
   // 转成整图坐标。
