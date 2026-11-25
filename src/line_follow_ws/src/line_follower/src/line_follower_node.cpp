@@ -1028,19 +1028,23 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         lane_keep_factor + (1.0 - lane_keep_factor) * edge_guard;
 
       if (red_on_left) {
-        // 红锥在左 -> 应向右避。
+        // 红锥在左 -> 应向右避（angular.z 为负）。
         if (yaw_rate > 0.0) {
-          // 当前巡线正在向左（朝红锥）转，削弱这部分巡线力。
-          yaw_rate *= effective_lane_keep_factor;
+          // 当前巡线正在向左（朝红锥）转，削弱巡线力并施加向右斥力。
+          yaw_rate = yaw_rate * effective_lane_keep_factor - repulsion_strength;
+        } else {
+          // 巡线本身已在向右转（例如右弯外侧红锥）：同向不叠加，避免双重右转切内弯压内圈黑线。
+          yaw_rate = std::min(yaw_rate, -repulsion_strength);
         }
-        yaw_rate -= repulsion_strength;
       } else {
-        // 红锥在右 -> 应向左避。
+        // 红锥在右 -> 应向左避（angular.z 为正）。
         if (yaw_rate < 0.0) {
-          // 当前巡线正在向右（朝红锥）转，削弱这部分巡线力。
-          yaw_rate *= effective_lane_keep_factor;
+          // 当前巡线正在向右（朝红锥）转，削弱巡线力并施加向左斥力。
+          yaw_rate = yaw_rate * effective_lane_keep_factor + repulsion_strength;
+        } else {
+          // 巡线本身已在向左转（例如左弯外侧红锥）：同向不叠加，避免双重左转切内弯压内圈黑线。
+          yaw_rate = std::max(yaw_rate, repulsion_strength);
         }
-        yaw_rate += repulsion_strength;
       }
 
       yaw_rate =
