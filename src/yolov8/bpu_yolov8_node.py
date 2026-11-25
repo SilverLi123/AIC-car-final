@@ -10,7 +10,9 @@ from cv_bridge import CvBridge
 from hobot_dnn import pyeasy_dnn as dnn
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image, RegionOfInterest
 
 # ============================================================
@@ -20,6 +22,45 @@ from sensor_msgs.msg import Image, RegionOfInterest
 # 与 detection_turn_controller.cpp 完全对接
 # ============================================================
 from ai_msgs.msg import PerceptionTargets, Target, Roi
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def filter_detection_box(
+    bx,
+    by,
+    bw,
+    bh,
+    orig_w,
+    orig_h,
+    min_box_size=6,
+    enable_roi_geo_filter=False,
+    roi_y_min_ratio=0.18,
+    roi_y_max_ratio=0.98,
+    max_box_size_ratio=0.35,
+    min_aspect_ratio=0.35,
+    max_aspect_ratio=3.0,
+):
+    """Filter out invalid or out-of-track boxes using size and optional ROI/geometry bounds."""
+    if bw < min_box_size or bh < min_box_size:
+        return False
+    if orig_w <= 0 or orig_h <= 0:
+        return False
+    if not enable_roi_geo_filter:
+        return True
+
+    cy_ratio = (by + bh * 0.5) / float(orig_h)
+    if cy_ratio < roi_y_min_ratio or cy_ratio > roi_y_max_ratio:
+        return False
+
+    if bw > orig_w * max_box_size_ratio or bh > orig_h * max_box_size_ratio:
+        return False
+
+    aspect = bw / float(bh)
+    if aspect < min_aspect_ratio or aspect > max_aspect_ratio:
+        return False
+
+    return True
 
 
 def bgr2nv12_fast(image):
@@ -78,17 +119,32 @@ class BPUYoloV8DigitNode(Node):
         self.bridge = CvBridge()
 
         # =====================================================
-        # 1. YOLO 参数
+        # 1. YOLO 与部署参数（启动缓存，支持动态参数更新）
         # =====================================================
+        default_model_path = os.path.join(SCRIPT_DIR, 'mod1', 'best_modified_yolov8.bin')
+        default_cls_list_path = os.path.join(SCRIPT_DIR, 'mod1', 'out.list')
+
         self.declare_parameter('conf_thresh', 0.25)
         self.declare_parameter('iou_thresh', 0.55)
         self.declare_parameter('nms_top_k', 20)
         self.declare_parameter('min_box_size', 6)
+        self.declare_parameter('model_path', default_model_path)
+        self.declare_parameter('cls_list_path', default_cls_list_path)
+        self.declare_parameter('enable_roi_geo_filter', False)
+        self.declare_parameter('roi_y_min_ratio', 0.18)
+        self.declare_parameter('roi_y_max_ratio', 0.98)
+        self.declare_parameter('max_box_size_ratio', 0.35)
+        self.declare_parameter('min_aspect_ratio', 0.35)
+        self.declare_parameter('max_aspect_ratio', 3.0)
+        self.declare_parameter('publish_debug_image_mode', 'auto')
+
+        self._refresh_cached_params()
+        self.add_on_set_parameters_callback(self._on_set_parameters)
 
         # =====================================================
         # 2. 类别文件
         # =====================================================
-        cls_list_path = '/home/sunrise/aic_car_final/src/yolov8/mod1/out.list'
+        cls_list_path = self.cls_list_path
 
         if os.path.exists(cls_list_path):
             with open(cls_list_path, 'r', encoding='utf-8') as f:
@@ -96,7 +152,7 @@ class BPUYoloV8DigitNode(Node):
             self.get_logger().info(f'加载 {len(self.classes)} 类: {self.classes}')
         else:
             self.classes = ['1', '2', '3', '4', '5', '6', '7', '8']
-            self.get_logger().warn('类别文件不存在，使用预设8类数字标签')
+            self.get_logger().warn(f'类别文件不存在 ({cls_list_path})，使用预设8类数字标签')
 
         if len(self.classes) != 8:
             self.get_logger().error(
@@ -107,14 +163,17 @@ class BPUYoloV8DigitNode(Node):
         # =====================================================
         # 3. 加载 X5 BPU 模型
         # =====================================================
-        model_path = '/home/sunrise/aic_car_final/src/yolov8/mod1/best_modified_yolov8.bin'
+        model_path = self.model_path
 
         if not os.path.exists(model_path):
             self.get_logger().error(f'模型文件不存在: {model_path}')
             return
 
         self.bpu_model = dnn.load(model_path)[0]
-        self.get_logger().info('RDK X5 BPU YOLOv8 视觉检测节点就绪')
+        self.get_logger().info(
+            f'RDK X5 BPU YOLOv8 视觉检测节点就绪: model={model_path}, '
+            f'roi_geo_filter={self.enable_roi_geo_filter}, debug_mode={self.publish_debug_image_mode}'
+        )
 
         # =====================================================
         # 4. YOLOv8 模型参数
@@ -151,6 +210,36 @@ class BPUYoloV8DigitNode(Node):
         self.get_logger().info('发布检测结果: /hobot_dnn_detection [ai_msgs/msg/PerceptionTargets]')
         self.get_logger().info('发布检测图像: /yolo_detection_image')
 
+    def _refresh_cached_params(self, overrides=None):
+        overrides = overrides or {}
+        get_val = lambda name: overrides[name] if name in overrides else self.get_parameter(name).value
+        self.conf_thresh = float(get_val('conf_thresh'))
+        self.iou_thresh = float(get_val('iou_thresh'))
+        self.nms_top_k = int(get_val('nms_top_k'))
+        self.min_box_size = int(get_val('min_box_size'))
+        self.model_path = str(get_val('model_path'))
+        self.cls_list_path = str(get_val('cls_list_path'))
+        self.enable_roi_geo_filter = bool(get_val('enable_roi_geo_filter'))
+        self.roi_y_min_ratio = float(get_val('roi_y_min_ratio'))
+        self.roi_y_max_ratio = float(get_val('roi_y_max_ratio'))
+        self.max_box_size_ratio = float(get_val('max_box_size_ratio'))
+        self.min_aspect_ratio = float(get_val('min_aspect_ratio'))
+        self.max_aspect_ratio = float(get_val('max_aspect_ratio'))
+        mode = str(get_val('publish_debug_image_mode')).strip().lower()
+        self.publish_debug_image_mode = mode if mode in ('auto', 'always', 'never') else 'auto'
+
+    def _on_set_parameters(self, params):
+        overrides = {p.name: p.value for p in params}
+        self._refresh_cached_params(overrides)
+        return SetParametersResult(successful=True)
+
+    def _should_publish_debug(self):
+        if self.publish_debug_image_mode == 'always':
+            return True
+        if self.publish_debug_image_mode == 'never':
+            return False
+        return self.img_pub.get_subscription_count() > 0
+
     def _make_grid(self, w, h):
         grids = []
         for s in self.strides:
@@ -162,10 +251,11 @@ class BPUYoloV8DigitNode(Node):
         return grids
 
     def image_callback(self, msg):
-        conf_thresh = self.get_parameter('conf_thresh').value
-        iou_thresh = self.get_parameter('iou_thresh').value
-        top_k = self.get_parameter('nms_top_k').value
-        min_box_size = self.get_parameter('min_box_size').value
+        conf_thresh = self.conf_thresh
+        iou_thresh = self.iou_thresh
+        top_k = self.nms_top_k
+        min_box_size = self.min_box_size
+        should_publish_debug = self._should_publish_debug()
 
         # =====================================================
         # 1. ROS Image -> OpenCV
@@ -282,7 +372,21 @@ class BPUYoloV8DigitNode(Node):
                 for det_index, i in enumerate(indices):
                     bx, by, bw, bh = boxes[i]
 
-                    if bw < min_box_size or bh < min_box_size:
+                    if not filter_detection_box(
+                        bx,
+                        by,
+                        bw,
+                        bh,
+                        orig_w,
+                        orig_h,
+                        min_box_size=min_box_size,
+                        enable_roi_geo_filter=self.enable_roi_geo_filter,
+                        roi_y_min_ratio=self.roi_y_min_ratio,
+                        roi_y_max_ratio=self.roi_y_max_ratio,
+                        max_box_size_ratio=self.max_box_size_ratio,
+                        min_aspect_ratio=self.min_aspect_ratio,
+                        max_aspect_ratio=self.max_aspect_ratio,
+                    ):
                         continue
 
                     conf = float(scores[i])
@@ -321,32 +425,34 @@ class BPUYoloV8DigitNode(Node):
                     target.rois.append(roi)
                     det_msg.targets.append(target)
 
-                    # D. OpenCV可视化
-                    color = (0, 255, 0)
-                    draw_x1, draw_y1 = int(bx), int(by)
-                    draw_x2, draw_y2 = int(bx + bw), int(by + bh)
+                    # D. OpenCV可视化（按需绘制，减少无订阅时的 CPU 开销）
+                    if should_publish_debug:
+                        color = (0, 255, 0)
+                        draw_x1, draw_y1 = int(bx), int(by)
+                        draw_x2, draw_y2 = int(bx + bw), int(by + bh)
 
-                    cv2.rectangle(orig_frame, (draw_x1, draw_y1), (draw_x2, draw_y2), color, 2)
-                    cv2.circle(orig_frame, (int(cx), int(cy)), 3, (0, 0, 255), -1)
+                        cv2.rectangle(orig_frame, (draw_x1, draw_y1), (draw_x2, draw_y2), color, 2)
+                        cv2.circle(orig_frame, (int(cx), int(cy)), 3, (0, 0, 255), -1)
 
-                    label = f'{raw_name} {conf:.2f}'
-                    (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                    lbl_y = max(draw_y1, th + baseline + 2)
+                        label = f'{raw_name} {conf:.2f}'
+                        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        lbl_y = max(draw_y1, th + baseline + 2)
 
-                    cv2.rectangle(orig_frame, (draw_x1, lbl_y - th - baseline - 2), (draw_x1 + tw + 2, lbl_y), color, -1)
-                    cv2.putText(orig_frame, label, (draw_x1 + 1, lbl_y - baseline - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+                        cv2.rectangle(orig_frame, (draw_x1, lbl_y - th - baseline - 2), (draw_x1 + tw + 2, lbl_y), color, -1)
+                        cv2.putText(orig_frame, label, (draw_x1 + 1, lbl_y - baseline - 1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
         # =====================================================
         # 9. 发布消息与图像
         # =====================================================
         self.det_pub.publish(det_msg)
 
-        fps_text = f'FPS: {self.current_fps:.1f} | Digits: {len(det_msg.targets)}'
-        cv2.putText(orig_frame, fps_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+        if should_publish_debug:
+            fps_text = f'FPS: {self.current_fps:.1f} | Digits: {len(det_msg.targets)}'
+            cv2.putText(orig_frame, fps_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
 
-        out_img_msg = self.bridge.cv2_to_imgmsg(orig_frame, encoding='bgr8')
-        out_img_msg.header = msg.header
-        self.img_pub.publish(out_img_msg)
+            out_img_msg = self.bridge.cv2_to_imgmsg(orig_frame, encoding='bgr8')
+            out_img_msg.header = msg.header
+            self.img_pub.publish(out_img_msg)
 
         # =====================================================
         # 11. FPS统计
@@ -365,11 +471,12 @@ def main(args=None):
     node = BPUYoloV8DigitNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
