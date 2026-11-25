@@ -171,6 +171,17 @@ private:
   bool permanent_stop_{false};
   rclcpp::Time yellow_line_detection_time_;
 
+  // 实验功能（默认关闭）：黄线几何过滤与 /odom 停稳闭环确认。
+  bool enable_yellow_geo_filter_{false};
+  double yellow_min_width_ratio_{0.25};
+  double yellow_min_aspect_ratio_{2.5};
+  bool enable_yellow_odom_stop_confirm_{false};
+  double yellow_still_speed_mps_{0.03};
+  double yellow_still_hold_sec_{0.15};
+  double yellow_stop_max_duration_{1.5};
+  bool yellow_still_started_{false};
+  rclcpp::Time yellow_still_start_time_;
+
   // ============================================================
   // Intersection probe
   // ============================================================

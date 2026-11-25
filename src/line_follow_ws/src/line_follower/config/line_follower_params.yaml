@@ -39,6 +39,15 @@ line_follower_node:
     yellow_permanent_count: 4
     yellow_clear_frames: 10
 
+    # 实验功能（默认关闭）：黄线横向长条几何过滤 + /odom 停稳闭环确认
+    enable_yellow_geo_filter: false
+    yellow_min_width_ratio: 0.25
+    yellow_min_aspect_ratio: 2.5
+    enable_yellow_odom_stop_confirm: false
+    yellow_still_speed_mps: 0.03
+    yellow_still_hold_sec: 0.15
+    yellow_stop_max_duration: 1.5
+
     enable_intersection_probe: false
     intersection_band_height: 50
     intersection_dark_ratio_threshold: 1.0

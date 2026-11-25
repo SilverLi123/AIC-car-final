@@ -192,6 +192,14 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("yellow_stop_duration", 1.0);
   this->declare_parameter("yellow_permanent_count", 5);
   this->declare_parameter("yellow_clear_frames", 10);
+  // 实验功能（默认关闭）：黄线横向几何过滤与 /odom 停稳闭环确认。
+  this->declare_parameter("enable_yellow_geo_filter", false);
+  this->declare_parameter("yellow_min_width_ratio", 0.25);
+  this->declare_parameter("yellow_min_aspect_ratio", 2.5);
+  this->declare_parameter("enable_yellow_odom_stop_confirm", false);
+  this->declare_parameter("yellow_still_speed_mps", 0.03);
+  this->declare_parameter("yellow_still_hold_sec", 0.15);
+  this->declare_parameter("yellow_stop_max_duration", 1.5);
   this->declare_parameter("enable_reverse_brake", false);
   this->declare_parameter("odom_topic", "/odom");
   this->declare_parameter("reverse_speed", 0.0);
@@ -361,6 +369,19 @@ void LineFollowerNode::declare_parameters()
     1, static_cast<int>(this->get_parameter("yellow_permanent_count").as_int()));
   yellow_clear_frames_required_ = std::max<int>(
     1, static_cast<int>(this->get_parameter("yellow_clear_frames").as_int()));
+  enable_yellow_geo_filter_ = this->get_parameter("enable_yellow_geo_filter").as_bool();
+  yellow_min_width_ratio_ = clamp(
+    this->get_parameter("yellow_min_width_ratio").as_double(), 0.0, 1.0);
+  yellow_min_aspect_ratio_ = std::max(
+    0.5, this->get_parameter("yellow_min_aspect_ratio").as_double());
+  enable_yellow_odom_stop_confirm_ =
+    this->get_parameter("enable_yellow_odom_stop_confirm").as_bool();
+  yellow_still_speed_mps_ = std::max(
+    0.0, this->get_parameter("yellow_still_speed_mps").as_double());
+  yellow_still_hold_sec_ = std::max(
+    0.0, this->get_parameter("yellow_still_hold_sec").as_double());
+  yellow_stop_max_duration_ = std::max(
+    yellow_stop_duration_, this->get_parameter("yellow_stop_max_duration").as_double());
   reverse_brake_enabled_ = this->get_parameter("enable_reverse_brake").as_bool();
   odom_topic_ = this->get_parameter("odom_topic").as_string();
   reverse_speed_ = this->get_parameter("reverse_speed").as_double();
@@ -433,10 +454,13 @@ void LineFollowerNode::setup_interfaces()
   start_sub_ = this->create_subscription<std_msgs::msg::Bool>(
     start_topic_, 10, std::bind(&LineFollowerNode::start_callback, this, std::placeholders::_1));
 
-  if (reverse_brake_enabled_) {
+  if (reverse_brake_enabled_ || enable_yellow_odom_stop_confirm_) {
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, rclcpp::QoS(10),
       std::bind(&LineFollowerNode::odom_callback, this, std::placeholders::_1));
+  }
+
+  if (reverse_brake_enabled_) {
     reverse_brake_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(20),
       std::bind(&LineFollowerNode::reverse_brake_timer_callback, this));
@@ -446,6 +470,13 @@ void LineFollowerNode::setup_interfaces()
       "cutoff=%.3f m/s, abort=%.3f m/s, odom='%s'.",
       reverse_speed_, reverse_max_duration_, reverse_cutoff_speed_,
       reverse_abort_speed_, odom_topic_.c_str());
+  }
+
+  if (enable_yellow_odom_stop_confirm_) {
+    RCLCPP_WARN(
+      this->get_logger(),
+      "EXPERIMENTAL yellow odom standstill confirm enabled: v<=%.3f m/s, hold=%.2f s, max=%.2f s",
+      yellow_still_speed_mps_, yellow_still_hold_sec_, yellow_stop_max_duration_);
   }
 
   if (publish_debug_image_) {
@@ -484,6 +515,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     yellow_clear_frames_ = 0;
     permanent_stop_ = false;
     reverse_brake_active_ = false;
+    yellow_still_started_ = false;
     yellow_line_detection_time_ = this->now();
 
     red_left_votes_ = 0;
@@ -510,6 +542,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
   if (!start_enabled_) {
     g_curve_assist = CurveAssistRuntime{};
     g_red_avoid.reset_lock();
+    yellow_still_started_ = false;
     if (reverse_brake_active_) {
       reverse_brake_active_ = false;
       publish_cmd_vel(0.0, 0.0, true);
@@ -915,6 +948,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
           "Final yellow line detected. Permanent stop activated.");
       } else {
         yellow_line_stop_active_ = true;
+        yellow_still_started_ = false;
 
         RCLCPP_INFO(
           this->get_logger(),
@@ -937,6 +971,61 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
   const double since_yellow_detection =
     (now - yellow_line_detection_time_).seconds();
+
+  bool temp_yellow_stop_active = false;
+  if (!permanent_stop_ && yellow_line_stop_active_) {
+    if (!enable_yellow_odom_stop_confirm_) {
+      if (since_yellow_detection < yellow_stop_duration_) {
+        temp_yellow_stop_active = true;
+      } else {
+        yellow_line_stop_active_ = false;
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Yellow line stop duration ended. Resuming line following.");
+      }
+    } else {
+      const double odom_age = odom_received_ ? (now - odom_receive_time_).seconds() : 1e9;
+      const bool odom_fresh =
+        odom_received_ && odom_age >= 0.0 && odom_age <= reverse_odom_timeout_;
+      if (!odom_fresh) {
+        yellow_still_started_ = false;
+        if (since_yellow_detection < yellow_stop_duration_) {
+          temp_yellow_stop_active = true;
+        } else {
+          yellow_line_stop_active_ = false;
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Yellow line stop duration ended (odom stale fallback). Resuming line following.");
+        }
+      } else {
+        if (std::abs(odom_linear_speed_) <= yellow_still_speed_mps_) {
+          if (!yellow_still_started_) {
+            yellow_still_started_ = true;
+            yellow_still_start_time_ = now;
+          }
+        } else {
+          yellow_still_started_ = false;
+        }
+        const double still_elapsed =
+          yellow_still_started_ ? (now - yellow_still_start_time_).seconds() : 0.0;
+        const bool hold_done =
+          (since_yellow_detection >= yellow_stop_duration_) &&
+          (still_elapsed >= yellow_still_hold_sec_);
+        const bool timed_out = since_yellow_detection >= yellow_stop_max_duration_;
+        if (hold_done || timed_out) {
+          yellow_line_stop_active_ = false;
+          yellow_still_started_ = false;
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Yellow line stop ended (%s): elapsed=%.2fs still=%.2fs odom_v=%.3f m/s.",
+            timed_out ? "max_timeout" : "standstill_confirmed",
+            since_yellow_detection, still_elapsed, odom_linear_speed_);
+        } else {
+          temp_yellow_stop_active = true;
+        }
+      }
+    }
+  }
 
   // ============================================================
   // 交叉口探针
@@ -980,23 +1069,12 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
-  } else if (yellow_line_stop_active_ &&
-             since_yellow_detection < yellow_stop_duration_)
-  {
+  } else if (temp_yellow_stop_active) {
     current_state = TrackState::YELLOW_LINE_DETECTED;
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
   } else {
-    if (yellow_line_stop_active_ &&
-        since_yellow_detection >= yellow_stop_duration_)
-    {
-      yellow_line_stop_active_ = false;
-      RCLCPP_INFO(
-        this->get_logger(),
-        "Yellow line stop duration ended. Resuming line following.");
-    }
-
     if (result_opt && result_opt->line_detected) {
       const auto & result = *result_opt;
       last_detection_time_ = now;
@@ -1058,8 +1136,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   // 交叉口/红色控制只有在黄色停车未激活时才能覆盖巡线
   // ============================================================
   const bool yellow_stop_now =
-    permanent_stop_ ||
-    (yellow_line_stop_active_ && since_yellow_detection < yellow_stop_duration_);
+    permanent_stop_ || temp_yellow_stop_active;
 
   if (!yellow_stop_now && intersection_active_) {
     if (now <= intersection_end_time_) {
@@ -1228,9 +1305,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   // ============================================================
   // 最终安全锁：黄色停车拥有最高优先级，任何后续控制都不能覆盖
   // ============================================================
-  if (permanent_stop_ ||
-      (yellow_line_stop_active_ && since_yellow_detection < yellow_stop_duration_))
-  {
+  if (permanent_stop_ || temp_yellow_stop_active) {
     current_state = TrackState::YELLOW_LINE_DETECTED;
     linear_speed = 0.0;
     yaw_rate = 0.0;
@@ -1364,6 +1439,29 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
 
     yellow_line_detected =
       yellow_area_ratio >= yellow_area_ratio_threshold_;
+
+    if (yellow_line_detected && enable_yellow_geo_filter_) {
+      std::vector<std::vector<cv::Point>> y_contours;
+      cv::findContours(
+        yellow_mask, y_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+      bool geo_ok = false;
+      const double min_w = static_cast<double>(width) * yellow_min_width_ratio_;
+      for (const auto & yc : y_contours) {
+        const cv::Rect ybox = cv::boundingRect(yc);
+        if (ybox.width <= 0 || ybox.height <= 0) {
+          continue;
+        }
+        const double y_aspect =
+          static_cast<double>(ybox.width) / static_cast<double>(ybox.height);
+        if (static_cast<double>(ybox.width) >= min_w &&
+            y_aspect >= yellow_min_aspect_ratio_)
+        {
+          geo_ok = true;
+          break;
+        }
+      }
+      yellow_line_detected = geo_ok;
+    }
   }
 
   // ============================================================
