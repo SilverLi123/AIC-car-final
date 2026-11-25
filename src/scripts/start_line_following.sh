@@ -181,7 +181,7 @@ is_preset_for_map() {
     # Ring presets from the ring-map result table. The K255 HOLD variants are
     # explicitly assigned to the ring map based on the user's successful runs,
     # despite their historical RB_FORK filename prefix.
-    ring:line_follower_params.yaml|ring:C11_058_curve025_y0020_hold10.yaml|\
+    ring:line_follower_params.yaml|ring:EXP_*.yaml|ring:C11_058_curve025_y0020_hold10.yaml|\
     ring:HS65_065_y002_curve022.yaml|ring:HS68_068_y002_curve022.yaml|\
     ring:P01_055_shared_strengths.yaml|ring:P02_058_shared_strengths.yaml|\
     ring:RB_C11_058_reverse*.yaml|ring:RB_HS70_070_reverse*.yaml|\
@@ -189,7 +189,7 @@ is_preset_for_map() {
       return 0 ;;
 
     # Fork-map presets: S is assigned here per the latest field report.
-    fork:line_follower_params.yaml|fork:S_060_thr005.yaml|fork:RB_S*.yaml|\
+    fork:line_follower_params.yaml|fork:EXP_*.yaml|fork:S_060_thr005.yaml|fork:RB_S*.yaml|\
     fork:RB_FORK72_*.yaml|fork:RB_FORK74_*.yaml|fork:RB_FORK80_*.yaml|\
     fork:RB_FORK85_*K235*.yaml|fork:RB_FORK85_*K245*.yaml|fork:RB_FORK87_*.yaml)
       return 0 ;;
@@ -217,7 +217,10 @@ choose_params() {
   for file in "${files[@]}"; do
     relative_path="${file#"$CONFIG_DIR"/}"
     usage_count="$(parameter_usage_count "$relative_path")"
-    if [[ "$relative_path" == parameter_presets/RB_*reverse*.yaml ||
+    if [[ "$relative_path" == parameter_presets/EXP_*.yaml ]]; then
+      printf '  %2d) [实验功能] %s  [使用 %s 次]\n' \
+        "$i" "$relative_path" "$usage_count" >&2
+    elif [[ "$relative_path" == parameter_presets/RB_*reverse*.yaml ||
           "$relative_path" == parameter_presets/RB_S*.yaml ]]; then
       printf '  %2d) [Reverse 制动实验] %s  [使用 %s 次]\n' \
         "$i" "$relative_path" "$usage_count" >&2
