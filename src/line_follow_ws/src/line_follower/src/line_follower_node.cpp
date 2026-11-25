@@ -647,8 +647,18 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         const bool red_very_close =
           red_bottom_ratio >= red_very_close_ratio;
 
+        // 仅当红障尚未完全错开到画面最外侧（内侧边缘仍侵入中间 44% 区域）时，
+        // 才允许 red_very_close 绕过走廊检查，避免已错过的贴边红锥继续把车推出对侧黑线。
+        const double frame_w = std::max(1.0, static_cast<double>(frame_bgr.cols));
+        const double red_left_ratio = static_cast<double>(g_red_avoid.bbox_img.x) / frame_w;
+        const double red_right_ratio =
+          static_cast<double>(g_red_avoid.bbox_img.x + g_red_avoid.bbox_img.width) / frame_w;
+        const bool red_still_blocking =
+          (side_sign < 0.0) ? (red_right_ratio >= 0.28) : (red_left_ratio <= 0.72);
+
         if (vote_confirmed &&
             red_close &&
+            red_still_blocking &&
             (red_in_corridor || red_very_close))
         {
           soft_red_active = true;
