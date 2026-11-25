@@ -12,6 +12,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include "line_follower/digit_decision_logic.hpp"
+
 namespace
 {
 constexpr double kDefaultConfThreshold = 0.6;
@@ -55,6 +57,29 @@ public:
     line_centroid_topic_ = this->declare_parameter<std::string>(
       "line_centroid_topic", kDefaultLineCentroidTopic);
     centroid_timeout_ = this->declare_parameter<double>("centroid_timeout", kDefaultCentroidTimeout);
+
+    enable_robust_digit_decision_ =
+      this->declare_parameter<bool>("enable_robust_digit_decision", false);
+    line_follower::decision::RobustDecisionConfig rcfg;
+    rcfg.conf_threshold = this->declare_parameter<double>("robust_conf_threshold", 0.45);
+    rcfg.trigger_y_min = this->declare_parameter<double>("trigger_y_min", 0.32);
+    rcfg.trigger_y_max = this->declare_parameter<double>("trigger_y_max", 0.78);
+    rcfg.vote_window_frames = this->declare_parameter<int>("vote_window_frames", 4);
+    rcfg.min_votes = this->declare_parameter<int>("min_votes", 2);
+    rcfg.pair_x_sep_min = this->declare_parameter<double>("pair_x_sep_min", 0.12);
+    rcfg.post_yellow_window_sec = this->declare_parameter<double>("post_yellow_window_sec", 3.5);
+    rcfg.turn_direction_sign = turn_direction_sign_;
+    rcfg.yaw_gain = yaw_gain_;
+    rcfg.fork_turn_linear = turn_linear_;
+    rcfg.fork_max_yaw_rate = max_yaw_rate_;
+    rcfg.fork_turn_duration = turn_duration_;
+    rcfg.straight_turn_linear = this->declare_parameter<double>("straight_turn_linear", 0.25);
+    rcfg.straight_max_yaw_rate = this->declare_parameter<double>("straight_max_yaw_rate", 0.55);
+    rcfg.straight_turn_duration = this->declare_parameter<double>("straight_turn_duration", 0.25);
+    rcfg.close_loop_x_tol = this->declare_parameter<double>("close_loop_x_tol", 0.08);
+    rcfg.close_loop_y_min = this->declare_parameter<double>("close_loop_y_min", 0.72);
+    rcfg.missing_finish_frames = this->declare_parameter<int>("missing_finish_frames", 2);
+    robust_decision_.set_config(rcfg);
 
     detection_sub_ = this->create_subscription<ai_msgs::msg::PerceptionTargets>(
       detection_topic_, rclcpp::QoS(10).best_effort(),
@@ -140,6 +165,7 @@ private:
       best_y_diff_ = 0.0;
       turning_ = false;
       turn_cooldown_until_ = this->now();
+      robust_decision_.on_yellow_line(this->now().seconds());
     }
   }
 
@@ -149,6 +175,72 @@ private:
       return;
     }
     rclcpp::Time now = this->now();
+
+    if (enable_robust_digit_decision_) {
+      const double frame_w = det_frame_width_ > 0 ? static_cast<double>(det_frame_width_) : 1.0;
+      const double frame_h = det_frame_height_ > 0 ? static_cast<double>(det_frame_height_) : 1.0;
+      std::vector<line_follower::decision::DigitCandidate> raw_candidates;
+      for (const auto & target : msg->targets) {
+        for (const auto & roi : target.rois) {
+          if (roi.rect.width <= 0 || roi.rect.height <= 0) {
+            continue;
+          }
+          int digit = parse_digit_label(roi.type);
+          if (digit < 0) {
+            continue;
+          }
+          double cx = (static_cast<double>(roi.rect.x_offset) +
+            static_cast<double>(roi.rect.width) * 0.5) / frame_w;
+          double cy = (static_cast<double>(roi.rect.y_offset) +
+            static_cast<double>(roi.rect.height) * 0.5) / frame_h;
+          raw_candidates.push_back(line_follower::decision::DigitCandidate{
+            digit,
+            static_cast<double>(roi.confidence),
+            std::clamp(cx, 0.0, 1.0),
+            std::clamp(cy, 0.0, 1.0)});
+        }
+      }
+
+      if (turning_) {
+        if (robust_decision_.should_finish_turn_early(raw_candidates)) {
+          turning_ = false;
+          turn_cooldown_until_ = now + rclcpp::Duration::from_seconds(turn_cooldown_);
+          RCLCPP_INFO(get_logger(), "[digit turn] finished early (closed-loop)");
+        }
+        return;
+      }
+
+      if (now < turn_cooldown_until_) {
+        return;
+      }
+
+      const bool centroid_valid =
+        (now - last_centroid_time_).seconds() <= centroid_timeout_;
+      if (!centroid_valid) {
+        return;
+      }
+
+      const auto plan = robust_decision_.process_frame(
+        raw_candidates, last_centroid_norm_x_, now.seconds());
+      if (plan.trigger) {
+        geometry_msgs::msg::Twist cmd;
+        cmd.linear.x = plan.linear_x;
+        cmd.angular.z = plan.angular_z;
+        turning_cmd_ = cmd;
+        turning_end_time_ = now + rclcpp::Duration::from_seconds(plan.duration_sec);
+        turn_cooldown_until_ = turning_end_time_ + rclcpp::Duration::from_seconds(turn_cooldown_);
+        turning_ = true;
+
+        RCLCPP_INFO(
+          get_logger(),
+          "[digit turn][robust:%s] best:%d votes:%d conf_sum:%.2f x:%.2f y:%.2f dur:%.2fs lin:%.2f ang:%.2f",
+          plan.is_fork ? "fork" : "straight",
+          plan.chosen_digit, plan.votes, plan.total_conf,
+          plan.target_x_norm, plan.target_y_norm,
+          plan.duration_sec, cmd.linear.x, cmd.angular.z);
+      }
+      return;
+    }
 
     // 正在转弯或冷却中，忽略
     if (turning_ || now < turn_cooldown_until_) {
@@ -284,6 +376,8 @@ private:
   double y_align_tolerance_{kDefaultYAlignTolerance};
   double turn_direction_sign_{kDefaultTurnDirectionSign};
   double centroid_timeout_{kDefaultCentroidTimeout};
+  bool enable_robust_digit_decision_{false};
+  line_follower::decision::RobustDigitDecision robust_decision_;
 
   // State
   bool turning_{false};

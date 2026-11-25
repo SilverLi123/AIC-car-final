@@ -100,9 +100,7 @@ def generate_launch_description():
             params_file,
             {
                 "stop_topic": stop_cmd_topic,
-                "stop_timeout": 0.5,
                 "high_topic": detection_cmd_topic,
-                "high_timeout": 0.5,
                 "low_topic": follower_cmd_topic,
                 "output_topic": cmd_vel_topic,
             },

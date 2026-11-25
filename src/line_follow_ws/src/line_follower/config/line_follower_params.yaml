@@ -156,6 +156,22 @@ detection_turn_controller:
     line_centroid_topic: "line_follower/centroid"
     centroid_timeout: 0.5
 
+    # 实验功能（默认关闭）：多帧置信度投票 + 触发带 + 左右配对选大 + 分叉/直道区分 + 闭环收尾
+    enable_robust_digit_decision: false
+    robust_conf_threshold: 0.45
+    trigger_y_min: 0.32
+    trigger_y_max: 0.78
+    vote_window_frames: 4
+    min_votes: 2
+    pair_x_sep_min: 0.12
+    post_yellow_window_sec: 3.5
+    straight_turn_linear: 0.25
+    straight_max_yaw_rate: 0.55
+    straight_turn_duration: 0.25
+    close_loop_x_tol: 0.08
+    close_loop_y_min: 0.72
+    missing_finish_frames: 2
+
 cmd_mux_node:
   ros__parameters:
     stop_topic: "/cmd_vel_stop"
