@@ -108,14 +108,16 @@ line_follower_node:
     red_near_ratio: 0.38
     red_very_close_ratio: 0.72
 
-    # 暂时沿用原走廊宽度，先避免连续弯漏锥；实测误触发多再往 0.30~0.35 收
-    red_corridor_half_width_ratio: 0.35
+    # 收窄走廊宽度，减少侧边红锥过早或过久触发避让
+    red_corridor_half_width_ratio: 0.25
 
     # 连续弯远处仍限制红锥修正；越近会平滑解除限制
     red_soft_curve_yaw_limit: 0.15
 
     # 当巡线正朝红锥一侧转时，risk=1 也至少保留 40% 弯道转向
     red_lane_keep_min_factor: 0.40
+    red_edge_guard_start_error: 0.15
+    red_edge_guard_full_error: 0.30
 
     # 越近越慢
     red_soft_speed: 0.25

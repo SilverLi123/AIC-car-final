@@ -219,6 +219,10 @@ void LineFollowerNode::declare_parameters()
   // 当巡线正在朝红锥一侧转时，最多削弱到该比例，不能把弯道转向完全清零。
   this->declare_parameter("red_lane_keep_min_factor", 0.40);
 
+  // 白道边界护栏：当车体已偏向避让侧（快压对侧黑线）时，平滑衰减红障斥力并恢复巡线回中力。
+  this->declare_parameter("red_edge_guard_start_error", 0.15);
+  this->declare_parameter("red_edge_guard_full_error", 0.30);
+
   // 红色避障只允许减速，不允许停车。无论红线还是红锥，最低保持该前进速度。
   this->declare_parameter("red_min_forward_speed", 0.06);
 
@@ -995,18 +999,36 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         1.0 -
         (1.0 - lane_keep_min_factor) * risk;
 
+      const double edge_guard_start = clamp(
+        this->get_parameter("red_edge_guard_start_error").as_double(), 0.0, 0.9);
+      const double edge_guard_full = clamp(
+        this->get_parameter("red_edge_guard_full_error").as_double(),
+        edge_guard_start + 0.02, 1.0);
+      const double line_err =
+        (result_opt && result_opt->line_detected) ? result_opt->error : 0.0;
+      // result.error > 0 表示白道在右（车偏左靠近左黑线）；< 0 表示白道在左（车偏右靠近右黑线）
+      const double edge_err =
+        red_on_left ? std::max(0.0, -line_err) : std::max(0.0, line_err);
+      const double edge_guard = clamp(
+        (edge_err - edge_guard_start) / (edge_guard_full - edge_guard_start),
+        0.0, 1.0);
+
+      repulsion_strength *= (1.0 - edge_guard);
+      const double effective_lane_keep_factor =
+        lane_keep_factor + (1.0 - lane_keep_factor) * edge_guard;
+
       if (red_on_left) {
         // 红锥在左 -> 应向右避。
         if (yaw_rate > 0.0) {
           // 当前巡线正在向左（朝红锥）转，削弱这部分巡线力。
-          yaw_rate *= lane_keep_factor;
+          yaw_rate *= effective_lane_keep_factor;
         }
         yaw_rate -= repulsion_strength;
       } else {
         // 红锥在右 -> 应向左避。
         if (yaw_rate < 0.0) {
           // 当前巡线正在向右（朝红锥）转，削弱这部分巡线力。
-          yaw_rate *= lane_keep_factor;
+          yaw_rate *= effective_lane_keep_factor;
         }
         yaw_rate += repulsion_strength;
       }
