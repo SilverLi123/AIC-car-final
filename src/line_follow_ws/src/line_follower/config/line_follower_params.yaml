@@ -137,6 +137,13 @@ line_follower_node:
     speed_gain_damping: 0.65
     publish_debug_image: true
 
+    # 实验功能（默认关闭）：红/黄过滤屏蔽 YOLO 数字框，防止彩色底数字误触发
+    enable_yolo_digit_masking: false
+    digit_detection_topic: "/hobot_dnn_detection"
+    digit_mask_timeout: 0.25
+    digit_mask_min_conf: 0.40
+    digit_mask_pad_px: 8
+
 detection_turn_controller:
   ros__parameters:
     detection_topic: "hobot_dnn_detection"

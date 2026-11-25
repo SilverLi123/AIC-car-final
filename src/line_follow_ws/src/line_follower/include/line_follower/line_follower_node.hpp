@@ -1,9 +1,12 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include <ai_msgs/msg/perception_targets.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <image_transport/image_transport.hpp>
@@ -53,8 +56,11 @@ private:
 
   void start_callback(const std_msgs::msg::Bool::SharedPtr msg);
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void digit_detection_callback(const ai_msgs::msg::PerceptionTargets::SharedPtr msg);
   void reverse_brake_timer_callback();
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+
+  void apply_digit_mask_to_roi(cv::Mat & mask, int roi_top) const;
 
   std::optional<ProcessingResult> process_image(const cv::Mat & frame_bgr) const;
 
@@ -226,6 +232,18 @@ private:
   rclcpp::Time last_detection_time_;
 
   // ============================================================
+  // YOLO digit masking (opt-in)
+  // ============================================================
+  bool enable_yolo_digit_masking_{false};
+  std::string digit_detection_topic_{"/hobot_dnn_detection"};
+  double digit_mask_timeout_{0.25};
+  double digit_mask_min_conf_{0.40};
+  int digit_mask_pad_px_{8};
+  bool has_digit_boxes_{false};
+  std::vector<cv::Rect> latest_digit_boxes_;
+  std::chrono::steady_clock::time_point latest_digit_steady_time_;
+
+  // ============================================================
   // ROS interfaces
   // ============================================================
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
@@ -236,6 +254,7 @@ private:
   image_transport::Subscriber image_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<ai_msgs::msg::PerceptionTargets>::SharedPtr digit_det_sub_;
   rclcpp::TimerBase::SharedPtr reverse_brake_timer_;
 
   image_transport::Publisher debug_pub_;

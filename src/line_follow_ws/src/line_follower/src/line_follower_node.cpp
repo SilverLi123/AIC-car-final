@@ -290,6 +290,13 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("speed_gain_damping", 0.5);
   this->declare_parameter("publish_debug_image", true);
 
+  // 实验功能（默认关闭）：使用 YOLO 数字检测框屏蔽红/黄过滤中的彩色数字区域。
+  this->declare_parameter("enable_yolo_digit_masking", false);
+  this->declare_parameter("digit_detection_topic", "/hobot_dnn_detection");
+  this->declare_parameter("digit_mask_timeout", 0.25);
+  this->declare_parameter("digit_mask_min_conf", 0.40);
+  this->declare_parameter("digit_mask_pad_px", 8);
+
   image_topic_ = this->get_parameter("image_topic").as_string();
   cmd_vel_topic_ = this->get_parameter("cmd_vel_topic").as_string();
   debug_image_topic_ = this->get_parameter("debug_image_topic").as_string();
@@ -400,6 +407,14 @@ void LineFollowerNode::declare_parameters()
   line_lost_stop_time_ = this->get_parameter("line_lost_stop_time").as_double();
   speed_gain_damping_ = this->get_parameter("speed_gain_damping").as_double();
   publish_debug_image_ = this->get_parameter("publish_debug_image").as_bool();
+
+  enable_yolo_digit_masking_ = this->get_parameter("enable_yolo_digit_masking").as_bool();
+  digit_detection_topic_ = this->get_parameter("digit_detection_topic").as_string();
+  digit_mask_timeout_ = std::max(0.0, this->get_parameter("digit_mask_timeout").as_double());
+  digit_mask_min_conf_ = clamp(
+    this->get_parameter("digit_mask_min_conf").as_double(), 0.0, 1.0);
+  digit_mask_pad_px_ = std::max<int>(
+    0, static_cast<int>(this->get_parameter("digit_mask_pad_px").as_int()));
 }
 
 void LineFollowerNode::setup_interfaces()
@@ -436,6 +451,17 @@ void LineFollowerNode::setup_interfaces()
   if (publish_debug_image_) {
     debug_pub_ = image_transport::create_publisher(this, debug_image_topic_);
     debug_enabled_ = true;
+  }
+
+  if (enable_yolo_digit_masking_) {
+    digit_det_sub_ = this->create_subscription<ai_msgs::msg::PerceptionTargets>(
+      digit_detection_topic_,
+      rclcpp::QoS(10).best_effort(),
+      std::bind(&LineFollowerNode::digit_detection_callback, this, std::placeholders::_1));
+    RCLCPP_WARN(
+      this->get_logger(),
+      "EXPERIMENTAL YOLO digit masking enabled: topic='%s', timeout=%.2fs, min_conf=%.2f, pad=%dpx",
+      digit_detection_topic_.c_str(), digit_mask_timeout_, digit_mask_min_conf_, digit_mask_pad_px_);
   }
 }
 
@@ -502,6 +528,58 @@ void LineFollowerNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr ms
   odom_linear_speed_ = msg->twist.twist.linear.x;
   odom_receive_time_ = this->now();
   odom_received_ = true;
+}
+
+void LineFollowerNode::digit_detection_callback(
+  const ai_msgs::msg::PerceptionTargets::SharedPtr msg)
+{
+  if (!msg) {
+    return;
+  }
+  std::vector<cv::Rect> boxes;
+  for (const auto & target : msg->targets) {
+    for (const auto & roi : target.rois) {
+      if (roi.rect.width <= 0 || roi.rect.height <= 0) {
+        continue;
+      }
+      if (static_cast<double>(roi.confidence) < digit_mask_min_conf_) {
+        continue;
+      }
+      boxes.emplace_back(
+        static_cast<int>(roi.rect.x_offset),
+        static_cast<int>(roi.rect.y_offset),
+        static_cast<int>(roi.rect.width),
+        static_cast<int>(roi.rect.height));
+    }
+  }
+  latest_digit_boxes_ = std::move(boxes);
+  latest_digit_steady_time_ = std::chrono::steady_clock::now();
+  has_digit_boxes_ = true;
+}
+
+void LineFollowerNode::apply_digit_mask_to_roi(cv::Mat & mask, int roi_top) const
+{
+  if (!enable_yolo_digit_masking_ || !has_digit_boxes_ || mask.empty()) {
+    return;
+  }
+  const double age =
+    std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - latest_digit_steady_time_).count();
+  if (age < 0.0 || age > digit_mask_timeout_) {
+    return;
+  }
+  const cv::Rect mask_bounds(0, 0, mask.cols, mask.rows);
+  for (const auto & box : latest_digit_boxes_) {
+    cv::Rect roi_box(
+      box.x - digit_mask_pad_px_,
+      (box.y - roi_top) - digit_mask_pad_px_,
+      box.width + 2 * digit_mask_pad_px_,
+      box.height + 2 * digit_mask_pad_px_);
+    roi_box &= mask_bounds;
+    if (roi_box.width > 0 && roi_box.height > 0) {
+      cv::rectangle(mask, roi_box, cv::Scalar(0), cv::FILLED);
+    }
+  }
 }
 
 void LineFollowerNode::reverse_brake_timer_callback()
@@ -1275,6 +1353,7 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
       255.0);
 
     cv::inRange(hsv, lower_yellow, upper_yellow, yellow_mask);
+    apply_digit_mask_to_roi(yellow_mask, roi_top);
 
     const int yellow_pixels = cv::countNonZero(yellow_mask);
     const double yellow_area_ratio =
@@ -1764,6 +1843,7 @@ bool LineFollowerNode::detect_red(
     mask1,
     mask2,
     mask);
+  apply_digit_mask_to_roi(mask, roi_top);
 
   // 红锥在远处时面积很小。
   // 先做轻量开运算去散点，再闭运算补小孔，避免把一个红锥切成很多碎块。
