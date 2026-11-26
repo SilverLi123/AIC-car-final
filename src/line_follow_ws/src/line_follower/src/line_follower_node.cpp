@@ -111,6 +111,30 @@ struct MotionRuntime
 
 MotionRuntime g_motion;
 
+struct RedCarveRuntime
+{
+  bool has_prev_near_x{false};
+  double prev_near_x{0.0};
+  bool has_prev_far_x{false};
+  double prev_far_x{0.0};
+  int hold_remaining{0};
+  double hold_bottom_ratio{0.0};
+  std::vector<line_follower::CarvedRect> hold_rects{};
+
+  void reset()
+  {
+    has_prev_near_x = false;
+    prev_near_x = 0.0;
+    has_prev_far_x = false;
+    prev_far_x = 0.0;
+    hold_remaining = 0;
+    hold_bottom_ratio = 0.0;
+    hold_rects.clear();
+  }
+};
+
+RedCarveRuntime g_red_carve;
+
 }  // namespace
 
 namespace line_follower
@@ -158,6 +182,14 @@ LineFollowerNode::LineFollowerNode()
       this->get_logger(),
       "EXPERIMENTAL PD steering damping enabled: kd=%.3f, lpf_alpha=%.2f, max_d=%.2f rad/s",
       kd_, kd_lpf_alpha_, kd_max_contribution_);
+  }
+
+  if (enable_red_freespace_carving_) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "EXPERIMENTAL red freespace carving enabled: pad=%d..%d px, trigger=%.2f, extend=%.2f, hold=%d, hyst=%.2f",
+      red_carve_pad_x_far_, red_carve_pad_x_near_, red_carve_trigger_bottom_ratio_,
+      red_carve_extend_down_ratio_, red_carve_hold_frames_, red_carve_hysteresis_ratio_);
   }
 }
 
@@ -305,6 +337,14 @@ void LineFollowerNode::declare_parameters()
   // 实验功能（默认关闭）：红线/红禁行区优先按左右剩余白道宽度选边绕行。
   this->declare_parameter("enable_red_white_width_side", false);
   this->declare_parameter("red_white_side_margin_px", 10.0);
+  // 实验功能（默认关闭）：白道自由空间雕刻避障（不挑红锥位置，沿剩余最宽白道中心绕行）。
+  this->declare_parameter("enable_red_freespace_carving", false);
+  this->declare_parameter("red_carve_pad_x_far", 38);
+  this->declare_parameter("red_carve_pad_x_near", 85);
+  this->declare_parameter("red_carve_trigger_bottom_ratio", 0.22);
+  this->declare_parameter("red_carve_extend_down_ratio", 0.68);
+  this->declare_parameter("red_carve_hold_frames", 5);
+  this->declare_parameter("red_carve_hysteresis_ratio", 0.80);
 
   // 丢线不停车：超过 line_lost_stop_time 只切换 LOST 状态，仍低速前进。
   this->declare_parameter("line_lost_stop_time", 0.8);
@@ -535,6 +575,22 @@ void LineFollowerNode::declare_parameters()
   red_zone_lock_clear_frames_ = std::max<int>(
     1, static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
 
+  enable_red_freespace_carving_ =
+    this->get_parameter("enable_red_freespace_carving").as_bool();
+  red_carve_pad_x_far_ = std::max<int>(
+    0, static_cast<int>(this->get_parameter("red_carve_pad_x_far").as_int()));
+  red_carve_pad_x_near_ = std::max<int>(
+    red_carve_pad_x_far_,
+    static_cast<int>(this->get_parameter("red_carve_pad_x_near").as_int()));
+  red_carve_trigger_bottom_ratio_ = clamp(
+    this->get_parameter("red_carve_trigger_bottom_ratio").as_double(), 0.0, 1.0);
+  red_carve_extend_down_ratio_ = clamp(
+    this->get_parameter("red_carve_extend_down_ratio").as_double(), 0.0, 1.0);
+  red_carve_hold_frames_ = std::max<int>(
+    0, static_cast<int>(this->get_parameter("red_carve_hold_frames").as_int()));
+  red_carve_hysteresis_ratio_ = clamp(
+    this->get_parameter("red_carve_hysteresis_ratio").as_double(), 0.5, 1.0);
+
   line_lost_stop_time_ = this->get_parameter("line_lost_stop_time").as_double();
   line_lost_forward_speed_ = std::max(
     0.01, this->get_parameter("line_lost_forward_speed").as_double());
@@ -659,6 +715,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     last_detection_time_ = this->now();
     last_state_ = TrackState::LOST;
     steering_pd_.reset();
+    g_red_carve.reset();
 
     RCLCPP_INFO(
       this->get_logger(),
@@ -673,6 +730,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     g_red_avoid.reset_lock();
     yellow_still_started_ = false;
     steering_pd_.reset();
+    g_red_carve.reset();
     if (reverse_brake_active_) {
       reverse_brake_active_ = false;
       publish_cmd_vel(0.0, 0.0, true);
@@ -816,6 +874,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     // 停车等待期间不累计连续弯判定，避免起步继承静止画面的旧状态。
     g_curve_assist = CurveAssistRuntime{};
     g_red_avoid.reset_lock();
+    g_red_carve.reset();
 
     static rclcpp::Time last_log_time = this->now();
     rclcpp::Time current_time = this->now();
@@ -871,7 +930,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   g_red_avoid.risk = 0.0;
   g_red_avoid.very_close = false;
 
-  if (enable_red_filter_ && result_opt && result_opt->line_detected) {
+  if (enable_red_filter_ && !enable_red_freespace_carving_ &&
+      result_opt && result_opt->line_detected)
+  {
     int roi_top = result_opt->roi_top;
     int roi_bottom = result_opt->roi_bottom;
     cv::Point2d line_centroid_roi(result_opt->centroid.x, result_opt->centroid.y);
@@ -1228,12 +1289,14 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     yaw_rate = 0.0;
     publish_stop_cmd = true;
     steering_pd_.reset();
+    g_red_carve.reset();
   } else if (temp_yellow_stop_active) {
     current_state = TrackState::YELLOW_LINE_DETECTED;
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
     steering_pd_.reset();
+    g_red_carve.reset();
   } else {
     if (result_opt && result_opt->line_detected) {
       const auto & result = *result_opt;
@@ -1450,6 +1513,23 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     current_state = TrackState::TRACKING;
   } else if (red_turning_ && now >= red_turn_end_time_) {
     red_turning_ = false;
+  }
+
+  // 自由空间雕刻模式下，红色障碍越近仅平滑减速（路线已在 process_image 中沿空道规划）。
+  if (!yellow_stop_now && enable_red_freespace_carving_ &&
+      result_opt && result_opt->red_carved_active &&
+      result_opt->red_carved_max_bottom_ratio >= red_near_ratio)
+  {
+    const double denom = std::max(1e-3, red_very_close_ratio - red_near_ratio);
+    const double risk = clamp(
+      (result_opt->red_carved_max_bottom_ratio - red_near_ratio) / denom,
+      0.0, 1.0);
+    const double safe_speed = std::max(
+      red_min_forward_speed,
+      red_soft_speed * (1.0 - 0.50 * risk));
+    linear_speed = std::max(
+      red_min_forward_speed,
+      std::min(linear_speed, safe_speed));
   }
 
   // ============================================================
@@ -1820,7 +1900,7 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
     };
 
   // ============================================================
-  // 8. 双采样带
+  // 8. 双采样带（可选：红障自由空间雕刻）
   // near：当前车前道路，权重大
   // far ：提前感知弯道方向
   // ============================================================
@@ -1831,14 +1911,233 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
 
   const double image_center_x = static_cast<double>(width) * 0.5;
 
-  const auto near_center =
-    find_band_center(near_y0, near_y1, image_center_x);
+  std::optional<double> near_center;
+  std::optional<double> far_center;
+  bool use_carved_channels = false;
 
-  const double far_reference =
-    near_center.has_value() ? near_center.value() : image_center_x;
+  if (enable_red_freespace_carving_ && enable_red_filter_) {
+    cv::Mat red_hsv;
+    if (reuse_process_hsv_for_red_) {
+      red_hsv = hsv;
+    } else {
+      cv::cvtColor(roi, red_hsv, cv::COLOR_BGR2HSV);
+    }
 
-  const auto far_center =
-    find_band_center(far_y0, far_y1, far_reference);
+    cv::Mat rmask1, rmask2, rmask;
+    cv::inRange(
+      red_hsv,
+      cv::Scalar(
+        static_cast<double>(red_h_low_1_),
+        static_cast<double>(red_s_min_),
+        static_cast<double>(red_v_min_)),
+      cv::Scalar(
+        static_cast<double>(red_h_high_1_),
+        255.0,
+        255.0),
+      rmask1);
+    cv::inRange(
+      red_hsv,
+      cv::Scalar(
+        static_cast<double>(red_h_low_2_),
+        static_cast<double>(red_s_min_),
+        static_cast<double>(red_v_min_)),
+      cv::Scalar(
+        static_cast<double>(red_h_high_2_),
+        255.0,
+        255.0),
+      rmask2);
+    cv::bitwise_or(rmask1, rmask2, rmask);
+    apply_digit_mask_to_roi(rmask, roi_top);
+
+    const cv::Mat red_morph_kernel =
+      cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+    cv::morphologyEx(
+      rmask, rmask, cv::MORPH_OPEN, red_morph_kernel, cv::Point(-1, -1), 1);
+    cv::morphologyEx(
+      rmask, rmask, cv::MORPH_CLOSE, red_morph_kernel, cv::Point(-1, -1), 1);
+
+    std::vector<std::vector<cv::Point>> red_contours;
+    cv::findContours(
+      rmask, red_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<RedObstacleBox> obstacles;
+    const double r_roi_area = std::max(1.0, static_cast<double>(rmask.total()));
+    const double roi_h_d = static_cast<double>(std::max(1, roi_height));
+    double max_bottom_ratio = 0.0;
+
+    std::vector<cv::Rect> raw_boxes;
+    raw_boxes.reserve(red_contours.size());
+    for (const auto & rc : red_contours) {
+      const double area = cv::contourArea(rc);
+      if (area <= 0.0) {
+        continue;
+      }
+      const cv::Rect rb = cv::boundingRect(rc);
+      if (rb.width <= 0 || rb.height <= 0) {
+        continue;
+      }
+      raw_boxes.push_back(rb);
+
+      const double aspect =
+        static_cast<double>(rb.width) / static_cast<double>(rb.height);
+      const bool is_wide_line =
+        aspect >= red_line_aspect_ratio_min_ &&
+        static_cast<double>(rb.width) >=
+          static_cast<double>(width) * red_line_min_width_ratio_;
+      const bool is_valid_cone =
+        rb.width >= red_cone_min_bbox_width_ &&
+        rb.height >= red_cone_min_bbox_height_ &&
+        (area / r_roi_area) >= red_cone_area_ratio_threshold_;
+
+      if (is_wide_line || is_valid_cone) {
+        obstacles.push_back({rb.x, rb.y, rb.width, rb.height, is_wide_line});
+        const double b_ratio = clamp(
+          static_cast<double>(rb.y + rb.height) / roi_h_d, 0.0, 1.0);
+        max_bottom_ratio = std::max(max_bottom_ratio, b_ratio);
+      }
+    }
+
+    if (enable_red_zone_lock_ && !red_contours.empty()) {
+      cv::Mat zmask;
+      const cv::Mat zkernel = cv::getStructuringElement(
+        cv::MORPH_RECT, cv::Size(red_zone_close_kernel_w_, red_zone_close_kernel_h_));
+      cv::morphologyEx(
+        rmask, zmask, cv::MORPH_CLOSE, zkernel, cv::Point(-1, -1), 1);
+      std::vector<std::vector<cv::Point>> zcontours;
+      cv::findContours(
+        zmask, zcontours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+      for (const auto & zc : zcontours) {
+        const double zarea = cv::contourArea(zc);
+        if (zarea <= 0.0 || (zarea / r_roi_area) < red_cone_area_ratio_threshold_) {
+          continue;
+        }
+        const cv::Rect zbox = cv::boundingRect(zc);
+        if (zbox.width <= 0 || zbox.height <= 0) {
+          continue;
+        }
+        const double zaspect =
+          static_cast<double>(zbox.width) / static_cast<double>(zbox.height);
+        if (zaspect < red_zone_aspect_ratio_min_ ||
+            zaspect > red_zone_aspect_ratio_max_ ||
+            static_cast<double>(zbox.width) <
+              static_cast<double>(width) * red_zone_min_width_ratio_)
+        {
+          continue;
+        }
+        int inner_fragments = 0;
+        for (const auto & rb : raw_boxes) {
+          if ((rb & zbox).area() > 0) {
+            inner_fragments++;
+          }
+        }
+        const bool wide_horizontal_tape =
+          zaspect >= 2.2 &&
+          static_cast<double>(zbox.width) >= static_cast<double>(width) * 0.22;
+        if (inner_fragments >= 2 || wide_horizontal_tape) {
+          obstacles.push_back({zbox.x, zbox.y, zbox.width, zbox.height, true});
+          const double b_ratio = clamp(
+            static_cast<double>(zbox.y + zbox.height) / roi_h_d, 0.0, 1.0);
+          max_bottom_ratio = std::max(max_bottom_ratio, b_ratio);
+        }
+      }
+    }
+
+    RedCarveConfig carve_cfg;
+    carve_cfg.pad_x_far = red_carve_pad_x_far_;
+    carve_cfg.pad_x_near = red_carve_pad_x_near_;
+    carve_cfg.trigger_bottom_ratio = red_carve_trigger_bottom_ratio_;
+    carve_cfg.extend_down_ratio = red_carve_extend_down_ratio_;
+    carve_cfg.min_run_width = 20;
+    carve_cfg.side_hysteresis_ratio = red_carve_hysteresis_ratio_;
+
+    std::vector<CarvedRect> carved_rects = compute_carved_rects(
+      obstacles, width, roi_height, carve_cfg, 1.0);
+
+    if (!carved_rects.empty()) {
+      if (max_bottom_ratio >= 0.55 && red_carve_hold_frames_ > 0) {
+        g_red_carve.hold_rects = carved_rects;
+        g_red_carve.hold_remaining = red_carve_hold_frames_;
+        g_red_carve.hold_bottom_ratio = max_bottom_ratio;
+      }
+    } else if (g_red_carve.hold_remaining > 0 && !g_red_carve.hold_rects.empty()) {
+      carved_rects = g_red_carve.hold_rects;
+      max_bottom_ratio = g_red_carve.hold_bottom_ratio;
+      g_red_carve.hold_remaining--;
+    }
+
+    if (!carved_rects.empty()) {
+      auto apply_and_select = [&](double scale, cv::Mat & out_mask,
+                                  BandChannelChoice & out_near,
+                                  BandChannelChoice & out_far,
+                                  std::vector<cv::Rect> & out_cv_rects) {
+        const std::vector<CarvedRect> scaled_rects =
+          (std::abs(scale - 1.0) < 1e-6) ? carved_rects :
+          compute_carved_rects(obstacles, width, roi_height, carve_cfg, scale);
+        out_mask = binary.clone();
+        out_cv_rects.clear();
+        for (const auto & cr : scaled_rects) {
+          const cv::Rect rect(cr.x0, cr.y0, cr.x1 - cr.x0, cr.y1 - cr.y0);
+          if (rect.width > 0 && rect.height > 0) {
+            cv::rectangle(out_mask, rect, cv::Scalar(0), cv::FILLED);
+            out_cv_rects.push_back(rect);
+          }
+        }
+        out_near = select_widest_band_channel(
+          out_mask.data, out_mask.cols, out_mask.rows,
+          static_cast<int>(out_mask.step),
+          near_y0, near_y1, carve_cfg.min_run_width,
+          g_red_carve.has_prev_near_x, g_red_carve.prev_near_x,
+          carve_cfg.side_hysteresis_ratio);
+        out_far = select_widest_band_channel(
+          out_mask.data, out_mask.cols, out_mask.rows,
+          static_cast<int>(out_mask.step),
+          far_y0, far_y1, carve_cfg.min_run_width,
+          g_red_carve.has_prev_far_x, g_red_carve.prev_far_x,
+          carve_cfg.side_hysteresis_ratio);
+      };
+
+      cv::Mat nav_binary;
+      BandChannelChoice near_choice, far_choice;
+      std::vector<cv::Rect> cv_rects;
+      apply_and_select(1.0, nav_binary, near_choice, far_choice, cv_rects);
+
+      if (!near_choice.valid && !obstacles.empty()) {
+        apply_and_select(0.55, nav_binary, near_choice, far_choice, cv_rects);
+      }
+
+      if (near_choice.valid) {
+        use_carved_channels = true;
+        near_center = near_choice.center_x;
+        g_red_carve.has_prev_near_x = true;
+        g_red_carve.prev_near_x = near_choice.center_x;
+
+        if (far_choice.valid) {
+          far_center = far_choice.center_x;
+          g_red_carve.has_prev_far_x = true;
+          g_red_carve.prev_far_x = far_choice.center_x;
+        } else {
+          g_red_carve.has_prev_far_x = false;
+        }
+
+        result.binary_mask = nav_binary;
+        result.red_carved_active = true;
+        result.red_carved_max_bottom_ratio = max_bottom_ratio;
+        result.red_carved_rects = std::move(cv_rects);
+      }
+    } else {
+      g_red_carve.has_prev_near_x = false;
+      g_red_carve.has_prev_far_x = false;
+    }
+  }
+
+  if (!use_carved_channels) {
+    near_center = find_band_center(near_y0, near_y1, image_center_x);
+
+    const double far_reference =
+      near_center.has_value() ? near_center.value() : image_center_x;
+
+    far_center = find_band_center(far_y0, far_y1, far_reference);
+  }
 
   // ============================================================
   // 9. 连续反向弯判别
@@ -2693,6 +2992,25 @@ void LineFollowerNode::publish_debug_image(
         0.50,
         cv::Scalar(255, 0, 255),
         2);
+    }
+
+    if (result.red_carved_active) {
+      for (const auto & cr : result.red_carved_rects) {
+        cv::rectangle(
+          overlay,
+          cv::Rect(cr.x, cr.y + result.roi_top, cr.width, cr.height),
+          cv::Scalar(0, 165, 255),
+          2);
+      }
+      char carve_text[120];
+      std::snprintf(
+        carve_text, sizeof(carve_text),
+        "CARVE_AVOID rects=%zu bottom=%.2f",
+        result.red_carved_rects.size(),
+        result.red_carved_max_bottom_ratio);
+      cv::putText(
+        overlay, carve_text, cv::Point(10, 120),
+        cv::FONT_HERSHEY_SIMPLEX, 0.50, cv::Scalar(0, 165, 255), 2);
     }
   }
 

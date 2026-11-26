@@ -116,6 +116,15 @@ line_follower_node:
     enable_red_white_width_side: false
     red_white_side_margin_px: 10.0
 
+    # 实验功能（默认关闭）：白道自由空间雕刻避障（不挑红锥/红框位置，沿剩余最宽白道中心绕行）
+    enable_red_freespace_carving: false
+    red_carve_pad_x_far: 38
+    red_carve_pad_x_near: 85
+    red_carve_trigger_bottom_ratio: 0.22
+    red_carve_extend_down_ratio: 0.68
+    red_carve_hold_frames: 5
+    red_carve_hysteresis_ratio: 0.80
+
     # 单个红锥轮廓阈值。0.0006 对当前 640x480 / ROI 约等于几十~百像素量级。
     red_cone_area_ratio_threshold: 0.0006
     red_cone_min_bbox_width: 4

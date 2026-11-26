@@ -17,6 +17,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include "line_follower/red_freespace_carver.hpp"
 #include "line_follower/steering_pd_controller.hpp"
 
 namespace line_follower
@@ -46,6 +47,11 @@ struct ProcessingResult
 
   int roi_top{0};
   int roi_bottom{0};
+
+  // 实验功能（默认关闭）：白道自由空间雕刻避障状态
+  bool red_carved_active{false};
+  double red_carved_max_bottom_ratio{0.0};
+  std::vector<cv::Rect> red_carved_rects{};
 };
 
 class LineFollowerNode : public rclcpp::Node
@@ -259,6 +265,15 @@ private:
   double red_zone_aspect_ratio_min_{0.5};
   double red_zone_aspect_ratio_max_{4.5};
   int red_zone_lock_clear_frames_{6};
+
+  // 实验功能（默认关闭）：白道自由空间雕刻避障参数
+  bool enable_red_freespace_carving_{false};
+  int red_carve_pad_x_far_{38};
+  int red_carve_pad_x_near_{85};
+  double red_carve_trigger_bottom_ratio_{0.22};
+  double red_carve_extend_down_ratio_{0.68};
+  int red_carve_hold_frames_{5};
+  double red_carve_hysteresis_ratio_{0.80};
 
   int red_left_votes_{0};
   int red_right_votes_{0};

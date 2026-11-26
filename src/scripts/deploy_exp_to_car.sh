@@ -107,6 +107,7 @@ HEADERS=(
   "$INC_DIR/digit_decision_logic.hpp"
   "$INC_DIR/red_side_selector.hpp"
   "$INC_DIR/steering_pd_controller.hpp"
+  "$INC_DIR/red_freespace_carver.hpp"
 )
 SOURCES=(
   "$SRC_DIR/line_follower_node.cpp"
