@@ -1,2 +1,0 @@
--r requirements.txt
-rosbags>=0.11.10,<0.12

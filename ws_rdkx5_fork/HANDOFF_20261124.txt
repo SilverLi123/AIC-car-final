@@ -1,0 +1,18 @@
+小车原始代码交接（2026-11-24）
+
+小车 SSH：ssh sunrise@172.20.10.14
+工作区：/home/sunrise/ws_rdkx5
+代码来源：ws_rdkx5.zip（101 个原始文件保持不变，排除旧 build/install/log/.git）
+之前的 aic_car_final 等目录保留。
+
+有运动条件后，在小车 SSH 终端执行：
+bash /home/sunrise/ws_rdkx5/start-original.sh
+
+该脚本加载已编译环境，启动底盘、摄像头、YOLO、带检测的巡线控制，并在前台运行原版 start_toggle_node。
+空格键切换开始/停止；Ctrl+C 退出本次脚本启动的进程。
+运行日志：/home/sunrise/ws_rdkx5/runtime_logs/时间戳/
+不需要重新编译。
+
+部署过程中未启动底盘、摄像头或巡线节点，未发送运动指令；实际整车运行尚未验证。
+编译日志：/home/sunrise/original_build_20261124.log
+压缩包 SHA256：1c2fa65c5d3ef1a98a970b195807e2c17652abac69d66a7925ac45ac50b8f640
