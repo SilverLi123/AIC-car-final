@@ -130,6 +130,25 @@ void test_no_digits_never_triggers()
   std::cout << "[PASS] test_no_digits_never_triggers\n";
 }
 
+void test_duplicate_boxes_in_single_frame_cannot_trigger()
+{
+  RobustDigitDecision dec;
+  dec.on_yellow_line(1.0);
+
+  // Frame 1: 3 overlapping duplicate detections of digit 8 at nearly the same location
+  TurnPlan p1 = dec.process_frame(
+    {{8, 0.85, 0.70, 0.50}, {8, 0.65, 0.71, 0.51}, {8, 0.55, 0.69, 0.49}}, 0.50, 1.5);
+  assert(!p1.trigger);
+
+  // Frame 2: second distinct frame confirms digit 8 with 2 multi-frame votes
+  TurnPlan p2 = dec.process_frame(
+    {{8, 0.88, 0.70, 0.54}}, 0.50, 1.55);
+  assert(p2.trigger);
+  assert(p2.chosen_digit == 8);
+  assert(p2.votes == 2);
+  std::cout << "[PASS] test_duplicate_boxes_in_single_frame_cannot_trigger\n";
+}
+
 }  // namespace
 
 int main()
@@ -140,6 +159,7 @@ int main()
   test_fork_vs_straight_limits();
   test_closed_loop_early_finish();
   test_no_digits_never_triggers();
-  std::cout << "ALL 6 DIGIT DECISION TESTS PASSED\n";
+  test_duplicate_boxes_in_single_frame_cannot_trigger();
+  std::cout << "ALL 7 DIGIT DECISION TESTS PASSED\n";
   return 0;
 }

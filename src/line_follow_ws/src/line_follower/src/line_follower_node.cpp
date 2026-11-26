@@ -285,10 +285,11 @@ void LineFollowerNode::declare_parameters()
 
   // 实验功能（默认关闭）：红色禁行区（空心框/竖条纹）聚类合并 + 绕行方向锁存。
   this->declare_parameter("enable_red_zone_lock", false);
-  this->declare_parameter("red_zone_close_kernel_w", 15);
-  this->declare_parameter("red_zone_close_kernel_h", 9);
+  this->declare_parameter("red_zone_close_kernel_w", 21);
+  this->declare_parameter("red_zone_close_kernel_h", 21);
   this->declare_parameter("red_zone_min_width_ratio", 0.16);
-  this->declare_parameter("red_zone_aspect_ratio_min", 1.4);
+  this->declare_parameter("red_zone_aspect_ratio_min", 0.5);
+  this->declare_parameter("red_zone_aspect_ratio_max", 4.5);
   this->declare_parameter("red_zone_lock_clear_frames", 6);
 
   // 丢线不停车：超过 line_lost_stop_time 只切换 LOST 状态，仍低速前进。
@@ -300,8 +301,9 @@ void LineFollowerNode::declare_parameters()
 
   // 实验功能（默认关闭）：使用 YOLO 数字检测框屏蔽红/黄过滤中的彩色数字区域。
   this->declare_parameter("enable_yolo_digit_masking", false);
+  this->declare_parameter("digit_mask_apply_to_yellow", false);
   this->declare_parameter("digit_detection_topic", "/hobot_dnn_detection");
-  this->declare_parameter("digit_mask_timeout", 0.25);
+  this->declare_parameter("digit_mask_timeout", 0.10);
   this->declare_parameter("digit_mask_min_conf", 0.40);
   this->declare_parameter("digit_mask_pad_px", 8);
 
@@ -430,6 +432,7 @@ void LineFollowerNode::declare_parameters()
   publish_debug_image_ = this->get_parameter("publish_debug_image").as_bool();
 
   enable_yolo_digit_masking_ = this->get_parameter("enable_yolo_digit_masking").as_bool();
+  digit_mask_apply_to_yellow_ = this->get_parameter("digit_mask_apply_to_yellow").as_bool();
   digit_detection_topic_ = this->get_parameter("digit_detection_topic").as_string();
   digit_mask_timeout_ = std::max(0.0, this->get_parameter("digit_mask_timeout").as_double());
   digit_mask_min_conf_ = clamp(
@@ -559,6 +562,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
 void LineFollowerNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
   odom_linear_speed_ = msg->twist.twist.linear.x;
+  odom_angular_speed_ = msg->twist.twist.angular.z;
   odom_receive_time_ = this->now();
   odom_received_ = true;
 }
@@ -584,6 +588,11 @@ void LineFollowerNode::digit_detection_callback(
         static_cast<int>(roi.rect.width),
         static_cast<int>(roi.rect.height));
     }
+  }
+  if (boxes.empty()) {
+    latest_digit_boxes_.clear();
+    has_digit_boxes_ = false;
+    return;
   }
   latest_digit_boxes_ = std::move(boxes);
   latest_digit_steady_time_ = std::chrono::steady_clock::now();
@@ -985,20 +994,26 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       }
     } else {
       const double odom_age = odom_received_ ? (now - odom_receive_time_).seconds() : 1e9;
+      const double odom_timeout = std::max(reverse_odom_timeout_, 0.30);
       const bool odom_fresh =
-        odom_received_ && odom_age >= 0.0 && odom_age <= reverse_odom_timeout_;
+        odom_received_ && odom_age >= 0.0 && odom_age <= odom_timeout;
+      const bool timed_out = since_yellow_detection >= yellow_stop_max_duration_;
       if (!odom_fresh) {
         yellow_still_started_ = false;
-        if (since_yellow_detection < yellow_stop_duration_) {
-          temp_yellow_stop_active = true;
-        } else {
+        if (timed_out) {
           yellow_line_stop_active_ = false;
-          RCLCPP_INFO(
+          RCLCPP_WARN(
             this->get_logger(),
-            "Yellow line stop duration ended (odom stale fallback). Resuming line following.");
+            "Yellow line stop ended (max_timeout while odom stale): elapsed=%.2fs odom_age=%.2fs.",
+            since_yellow_detection, odom_age);
+        } else {
+          temp_yellow_stop_active = true;
         }
       } else {
-        if (std::abs(odom_linear_speed_) <= yellow_still_speed_mps_) {
+        const bool speed_still =
+          std::abs(odom_linear_speed_) <= yellow_still_speed_mps_ &&
+          std::abs(odom_angular_speed_) <= 0.05;
+        if (speed_still) {
           if (!yellow_still_started_) {
             yellow_still_started_ = true;
             yellow_still_start_time_ = now;
@@ -1011,15 +1026,14 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         const bool hold_done =
           (since_yellow_detection >= yellow_stop_duration_) &&
           (still_elapsed >= yellow_still_hold_sec_);
-        const bool timed_out = since_yellow_detection >= yellow_stop_max_duration_;
         if (hold_done || timed_out) {
           yellow_line_stop_active_ = false;
           yellow_still_started_ = false;
           RCLCPP_INFO(
             this->get_logger(),
-            "Yellow line stop ended (%s): elapsed=%.2fs still=%.2fs odom_v=%.3f m/s.",
+            "Yellow line stop ended (%s): elapsed=%.2fs still=%.2fs odom_v=%.3f odom_w=%.3f.",
             timed_out ? "max_timeout" : "standstill_confirmed",
-            since_yellow_detection, still_elapsed, odom_linear_speed_);
+            since_yellow_detection, still_elapsed, odom_linear_speed_, odom_angular_speed_);
         } else {
           temp_yellow_stop_active = true;
         }
@@ -1428,7 +1442,9 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
       255.0);
 
     cv::inRange(hsv, lower_yellow, upper_yellow, yellow_mask);
-    apply_digit_mask_to_roi(yellow_mask, roi_top);
+    if (digit_mask_apply_to_yellow_) {
+      apply_digit_mask_to_roi(yellow_mask, roi_top);
+    }
 
     const int yellow_pixels = cv::countNonZero(yellow_mask);
     const double yellow_area_ratio =
@@ -2031,7 +2047,9 @@ bool LineFollowerNode::detect_red(
     const double zone_min_w_ratio = clamp(
       this->get_parameter("red_zone_min_width_ratio").as_double(), 0.0, 1.0);
     const double zone_aspect_min = std::max(
-      0.5, this->get_parameter("red_zone_aspect_ratio_min").as_double());
+      0.1, this->get_parameter("red_zone_aspect_ratio_min").as_double());
+    const double zone_aspect_max = std::max(
+      zone_aspect_min, this->get_parameter("red_zone_aspect_ratio_max").as_double());
 
     cv::Mat zone_mask;
     const cv::Mat zone_kernel =
@@ -2042,6 +2060,17 @@ bool LineFollowerNode::detect_red(
     std::vector<std::vector<cv::Point>> zone_contours;
     cv::findContours(
       zone_mask, zone_contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    std::vector<cv::Rect> raw_boxes;
+    raw_boxes.reserve(contours.size());
+    for (const auto & rc : contours) {
+      if (cv::contourArea(rc) > 0.0) {
+        const cv::Rect rb = cv::boundingRect(rc);
+        if (rb.width > 0 && rb.height > 0) {
+          raw_boxes.push_back(rb);
+        }
+      }
+    }
 
     for (const auto & zc : zone_contours) {
       const double z_area = cv::contourArea(zc);
@@ -2054,10 +2083,23 @@ bool LineFollowerNode::detect_red(
       }
       const double z_aspect =
         static_cast<double>(z_box.width) / static_cast<double>(z_box.height);
-      if (z_aspect >= zone_aspect_min &&
-          static_cast<double>(z_box.width) >=
+      if (z_aspect < zone_aspect_min || z_aspect > zone_aspect_max ||
+          static_cast<double>(z_box.width) <
             static_cast<double>(frame_bgr.cols) * zone_min_w_ratio)
       {
+        continue;
+      }
+
+      int inner_fragments = 0;
+      for (const auto & rb : raw_boxes) {
+        if ((rb & z_box).area() > 0) {
+          inner_fragments++;
+        }
+      }
+      const bool wide_horizontal_tape =
+        z_aspect >= 2.2 &&
+        static_cast<double>(z_box.width) >= static_cast<double>(frame_bgr.cols) * 0.22;
+      if (inner_fragments >= 2 || wide_horizontal_tape) {
         if (z_area > best_zone_area) {
           best_zone_area = z_area;
           best_zone_box = z_box;
@@ -2249,14 +2291,28 @@ bool LineFollowerNode::detect_red(
       -1.0;
   }
 
+  const double roi_h =
+    std::max(
+      1,
+      roi_bottom - roi_top);
+
+  const double computed_bottom_ratio =
+    clamp(
+      red_bottom_roi.y / static_cast<double>(roi_h),
+      0.0,
+      1.0);
+
   if (red_zone_lock_enabled) {
-    if (!g_red_avoid.dir_locked) {
+    const double lock_near_ratio = clamp(
+      this->get_parameter("red_near_ratio").as_double(), 0.0, 1.0);
+    if (g_red_avoid.dir_locked) {
+      side_sign = g_red_avoid.locked_side_sign;
+      g_red_avoid.dir_clear_frames = 0;
+    } else if (computed_bottom_ratio >= lock_near_ratio) {
       g_red_avoid.dir_locked = true;
       g_red_avoid.locked_side_sign = side_sign;
-    } else {
-      side_sign = g_red_avoid.locked_side_sign;
+      g_red_avoid.dir_clear_frames = 0;
     }
-    g_red_avoid.dir_clear_frames = 0;
   } else {
     g_red_avoid.reset_lock();
   }
@@ -2310,18 +2366,7 @@ bool LineFollowerNode::detect_red(
   g_red_avoid.contour_area_ratio =
     contour_area_ratio;
 
-  const double roi_h =
-    std::max(
-      1,
-      roi_bottom - roi_top);
-
-  g_red_avoid.bottom_ratio =
-    clamp(
-      (red_bottom_img.y -
-        static_cast<double>(roi_top)) /
-        static_cast<double>(roi_h),
-      0.0,
-      1.0);
+  g_red_avoid.bottom_ratio = computed_bottom_ratio;
 
   return true;
 }

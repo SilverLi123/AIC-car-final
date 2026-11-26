@@ -119,9 +119,18 @@ public:
       window_.pop_front();
     }
 
-    std::vector<DigitCandidate> all_obs;
-    for (const auto & frame_obs : window_) {
-      all_obs.insert(all_obs.end(), frame_obs.begin(), frame_obs.end());
+    struct ObsWithFrame
+    {
+      DigitCandidate c;
+      size_t frame_idx{0};
+    };
+
+    std::vector<ObsWithFrame> all_obs;
+    const size_t num_frames = window_.size();
+    for (size_t f = 0; f < num_frames; ++f) {
+      for (const auto & item : window_[f]) {
+        all_obs.push_back(ObsWithFrame{item, f});
+      }
     }
     if (all_obs.empty()) {
       return TurnPlan{};
@@ -130,14 +139,14 @@ public:
     // Split observations in the sliding window into at most 2 spatial slots (left / right).
     std::sort(
       all_obs.begin(), all_obs.end(),
-      [](const DigitCandidate & a, const DigitCandidate & b) {
-        return a.x_norm < b.x_norm;
+      [](const ObsWithFrame & a, const ObsWithFrame & b) {
+        return a.c.x_norm < b.c.x_norm;
       });
 
     size_t split_idx = all_obs.size();
     double max_gap = 0.0;
     for (size_t i = 1; i < all_obs.size(); ++i) {
-      const double gap = all_obs[i].x_norm - all_obs[i - 1].x_norm;
+      const double gap = all_obs[i].c.x_norm - all_obs[i - 1].c.x_norm;
       if (gap >= cfg_.pair_x_sep_min && gap > max_gap) {
         max_gap = gap;
         split_idx = i;
@@ -166,13 +175,35 @@ public:
       std::array<double, 9> y_sum{};
       std::array<double, 9> y_max{};
 
+      // Count at most 1 vote per (frame, digit) inside a slot so duplicate boxes
+      // in a single frame cannot satisfy min_votes without multi-frame evidence.
+      std::vector<std::array<double, 9>> frame_best_conf(num_frames);
+      std::vector<std::array<size_t, 9>> frame_best_idx(num_frames);
+      for (auto & arr : frame_best_conf) {
+        arr.fill(-1.0);
+      }
+
       for (size_t i = begin_idx; i < end_idx; ++i) {
-        const int d = all_obs[i].digit;
-        votes[d]++;
-        conf_sum[d] += all_obs[i].conf;
-        x_sum[d] += all_obs[i].x_norm;
-        y_sum[d] += all_obs[i].y_norm;
-        y_max[d] = std::max(y_max[d], all_obs[i].y_norm);
+        const size_t f = all_obs[i].frame_idx;
+        const int d = all_obs[i].c.digit;
+        if (all_obs[i].c.conf > frame_best_conf[f][d]) {
+          frame_best_conf[f][d] = all_obs[i].c.conf;
+          frame_best_idx[f][d] = i;
+        }
+      }
+
+      for (size_t f = 0; f < num_frames; ++f) {
+        for (int d = 1; d <= 8; ++d) {
+          if (frame_best_conf[f][d] < 0.0) {
+            continue;
+          }
+          const DigitCandidate & c = all_obs[frame_best_idx[f][d]].c;
+          votes[d]++;
+          conf_sum[d] += c.conf;
+          x_sum[d] += c.x_norm;
+          y_sum[d] += c.y_norm;
+          y_max[d] = std::max(y_max[d], c.y_norm);
+        }
       }
 
       const int req_votes = std::max(1, cfg_.min_votes);

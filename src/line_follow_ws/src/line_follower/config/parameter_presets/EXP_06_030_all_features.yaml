@@ -103,10 +103,11 @@ line_follower_node:
 
     # 实验功能（默认关闭）：红色禁行区（空心框/竖条纹）聚类合并 + 绕行方向锁存
     enable_red_zone_lock: true
-    red_zone_close_kernel_w: 15
-    red_zone_close_kernel_h: 9
+    red_zone_close_kernel_w: 21
+    red_zone_close_kernel_h: 21
     red_zone_min_width_ratio: 0.16
-    red_zone_aspect_ratio_min: 1.4
+    red_zone_aspect_ratio_min: 0.5
+    red_zone_aspect_ratio_max: 4.5
     red_zone_lock_clear_frames: 6
 
     # 单个红锥轮廓阈值。0.0006 对当前 640x480 / ROI 约等于几十~百像素量级。
@@ -150,8 +151,9 @@ line_follower_node:
 
     # 实验功能（默认关闭）：红/黄过滤屏蔽 YOLO 数字框，防止彩色底数字误触发
     enable_yolo_digit_masking: true
+    digit_mask_apply_to_yellow: false
     digit_detection_topic: "/hobot_dnn_detection"
-    digit_mask_timeout: 0.25
+    digit_mask_timeout: 0.10
     digit_mask_min_conf: 0.40
     digit_mask_pad_px: 8
 

@@ -158,6 +158,7 @@ private:
   bool reverse_brake_active_{false};
   bool odom_received_{false};
   double odom_linear_speed_{0.0};
+  double odom_angular_speed_{0.0};
   rclcpp::Time odom_receive_time_;
   rclcpp::Time reverse_brake_start_time_;
 
@@ -246,8 +247,9 @@ private:
   // YOLO digit masking (opt-in)
   // ============================================================
   bool enable_yolo_digit_masking_{false};
+  bool digit_mask_apply_to_yellow_{false};
   std::string digit_detection_topic_{"/hobot_dnn_detection"};
-  double digit_mask_timeout_{0.25};
+  double digit_mask_timeout_{0.10};
   double digit_mask_min_conf_{0.40};
   int digit_mask_pad_px_{8};
   bool has_digit_boxes_{false};

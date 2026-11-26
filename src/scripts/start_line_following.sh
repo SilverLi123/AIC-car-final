@@ -18,6 +18,8 @@ START_CMD_TOPIC="/line_follower/start_cmd"
 PARAMS=""
 MAP=""
 START_YOLO=false
+YOLO_MODEL=""
+YOLO_ROI_FILTER=false
 FINISH_HEADING_CALIBRATION=""
 SKIP_CHASSIS=false
 PIDS=()
@@ -39,6 +41,8 @@ usage() {
   --params <路径或文件名>  巡线参数 YAML；直接指定时不弹交互菜单
   --map ring|fork          选择对应地图菜单；与 --params 同用时校验配置归属
   --yolo                   同时启动 YOLO，并使用原版三节点巡线入口
+  --yolo-model <路径>      指定 YOLO .bin 模型路径（传给 bpu_yolov8_node.py）
+  --yolo-roi-filter        开启 YOLO 顶部/极端异常框过滤（enable_roi_geo_filter=true）
   --finish-heading <JSON>  启用独立终点对正实验（需要已验证地面标定）
   --skip-chassis           底盘已在其他终端运行时跳过底盘启动
   -h, --help               显示帮助
@@ -63,6 +67,10 @@ while (($#)); do
       esac
       shift 2 ;;
     --yolo) START_YOLO=true; shift ;;
+    --yolo-model)
+      (($# >= 2)) || { echo "--yolo-model 需要 .bin 模型路径" >&2; exit 2; }
+      YOLO_MODEL="$2"; shift 2 ;;
+    --yolo-roi-filter) YOLO_ROI_FILTER=true; shift ;;
     --finish-heading)
       (($# >= 2)) || { echo "--finish-heading 需要标定 JSON 路径" >&2; exit 2; }
       FINISH_HEADING_CALIBRATION="$2"; shift 2 ;;
@@ -369,7 +377,21 @@ fi
 spawn camera "$CAMERA_DIR" python3 camera.py
 sleep 2
 if [[ "$START_YOLO" == true ]]; then
-  spawn yolo "$YOLO_DIR" python3 bpu_yolov8_node.py
+  YOLO_ARGS=()
+  if [[ -n "$YOLO_MODEL" ]]; then
+    if [[ "$YOLO_MODEL" != /* ]]; then
+      YOLO_MODEL="$ROOT/$YOLO_MODEL"
+    fi
+    YOLO_ARGS+=(-p "model_path:=$YOLO_MODEL")
+  fi
+  if [[ "$YOLO_ROI_FILTER" == true ]]; then
+    YOLO_ARGS+=(-p "enable_roi_geo_filter:=true")
+  fi
+  if ((${#YOLO_ARGS[@]})); then
+    spawn yolo "$YOLO_DIR" python3 bpu_yolov8_node.py --ros-args "${YOLO_ARGS[@]}"
+  else
+    spawn yolo "$YOLO_DIR" python3 bpu_yolov8_node.py
+  fi
   sleep 2
   spawn follower "$LINE_WS" ros2 launch line_follower line_follower_with_detection.launch.py "params_file:=$PARAMS"
 else
