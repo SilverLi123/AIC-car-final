@@ -152,6 +152,13 @@ LineFollowerNode::LineFollowerNode()
       this->get_parameter("curve_preview_max_far_weight").as_double(),
       this->get_parameter("curve_preview_yaw_slew_rate").as_double());
   }
+
+  if (kd_ > 0.0) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "EXPERIMENTAL PD steering damping enabled: kd=%.3f, lpf_alpha=%.2f, max_d=%.2f rad/s",
+      kd_, kd_lpf_alpha_, kd_max_contribution_);
+  }
 }
 
 void LineFollowerNode::declare_parameters()
@@ -169,6 +176,9 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("min_speed", 0.0);
   this->declare_parameter("max_yaw_rate", 1.2);
   this->declare_parameter("kp", 1.8);
+  this->declare_parameter("kd", 0.0);
+  this->declare_parameter("kd_lpf_alpha", 0.35);
+  this->declare_parameter("kd_max_contribution", 0.45);
 
   this->declare_parameter("roi_top_ratio", 0.5);
   this->declare_parameter("roi_bottom_ratio", 0.05);
@@ -324,6 +334,9 @@ void LineFollowerNode::declare_parameters()
   min_speed_ = this->get_parameter("min_speed").as_double();
   max_yaw_rate_ = this->get_parameter("max_yaw_rate").as_double();
   kp_ = this->get_parameter("kp").as_double();
+  kd_ = std::max(0.0, this->get_parameter("kd").as_double());
+  kd_lpf_alpha_ = clamp(this->get_parameter("kd_lpf_alpha").as_double(), 0.05, 1.0);
+  kd_max_contribution_ = std::max(0.0, this->get_parameter("kd_max_contribution").as_double());
 
   roi_top_ratio_ = this->get_parameter("roi_top_ratio").as_double();
   roi_bottom_ratio_ = this->get_parameter("roi_bottom_ratio").as_double();
@@ -540,6 +553,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
 
     last_detection_time_ = this->now();
     last_state_ = TrackState::LOST;
+    steering_pd_.reset();
 
     RCLCPP_INFO(
       this->get_logger(),
@@ -553,6 +567,7 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     g_curve_assist = CurveAssistRuntime{};
     g_red_avoid.reset_lock();
     yellow_still_started_ = false;
+    steering_pd_.reset();
     if (reverse_brake_active_) {
       reverse_brake_active_ = false;
       publish_cmd_vel(0.0, 0.0, true);
@@ -705,6 +720,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     }
     // 未启动时不继承上一段运动的转向预瞄状态。
     curve_preview_yaw_initialized_ = false;
+    steering_pd_.reset();
     // 未启动时仍保留基础调试图。
     if (result_opt && debug_enabled_) {
       publish_debug_image(msg, frame_bgr, *result_opt);
@@ -1090,19 +1106,26 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
+    steering_pd_.reset();
   } else if (temp_yellow_stop_active) {
     current_state = TrackState::YELLOW_LINE_DETECTED;
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
+    steering_pd_.reset();
   } else {
     if (result_opt && result_opt->line_detected) {
       const auto & result = *result_opt;
       last_detection_time_ = now;
       current_state = TrackState::TRACKING;
 
-      const double yaw_cmd =
-        clamp(-(kp_ * result.error), -max_yaw_rate_, max_yaw_rate_);
+      SteeringPdConfig pd_cfg;
+      pd_cfg.kp = kp_;
+      pd_cfg.kd = kd_;
+      pd_cfg.kd_lpf_alpha = kd_lpf_alpha_;
+      pd_cfg.kd_max_contribution = kd_max_contribution_;
+      pd_cfg.max_yaw_rate = max_yaw_rate_;
+      const double yaw_cmd = steering_pd_.compute(result.error, now.seconds(), pd_cfg);
 
       const double composite_err = std::abs(result.error);
       const double speed_scale =
@@ -1130,6 +1153,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       linear_speed = speed_cmd;
       yaw_rate = yaw_cmd;
     } else {
+      steering_pd_.reset();
       const double since_detection =
         (now - last_detection_time_).seconds();
 

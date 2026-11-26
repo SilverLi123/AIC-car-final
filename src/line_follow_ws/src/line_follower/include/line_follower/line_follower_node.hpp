@@ -17,6 +17,8 @@
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include "line_follower/steering_pd_controller.hpp"
+
 namespace line_follower
 {
 
@@ -111,6 +113,11 @@ private:
   double min_speed_{0.0};
   double max_yaw_rate_{1.2};
   double kp_{1.8};
+  // 实验功能（默认关闭，kd=0.0）：可选低通滤波 PD 转向阻尼。
+  double kd_{0.0};
+  double kd_lpf_alpha_{0.35};
+  double kd_max_contribution_{0.45};
+  SteeringPdController steering_pd_;
 
   // ============================================================
   // ROI / image processing

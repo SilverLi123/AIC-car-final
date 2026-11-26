@@ -13,6 +13,10 @@ line_follower_node:
     min_speed: 0.0
     max_yaw_rate: 1.5
     kp: 2.45
+    # 实验功能（默认关闭，kd=0.0）：可选低通滤波 PD 转向阻尼
+    kd: 0.0
+    kd_lpf_alpha: 0.35
+    kd_max_contribution: 0.45
 
     roi_top_ratio: 0.65
     roi_bottom_ratio: 0.20
