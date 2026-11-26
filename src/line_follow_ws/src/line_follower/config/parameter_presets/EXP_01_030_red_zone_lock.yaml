@@ -99,8 +99,8 @@ line_follower_node:
 
     # 红色停车线同样避障但不停车
     red_line_fallback_direction: -1
-    red_line_soft_yaw: 0.35
-    red_line_speed: 0.12
+    red_line_soft_yaw: 0.22
+    red_line_speed: 0.15
 
     # 实验功能（默认关闭）：红色禁行区（空心框/竖条纹）聚类合并 + 绕行方向锁存
     enable_red_zone_lock: true

@@ -922,8 +922,32 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
         double lateral_distance = 1e9;
         if (corridor_norm > 1e-6) {
-          lateral_distance = std::abs(
-            corridor_v.x * red_v.y - corridor_v.y * red_v.x) / corridor_norm;
+          const double cross_center =
+            corridor_v.x * red_v.y - corridor_v.y * red_v.x;
+          if (enable_red_zone_lock_ && g_red_avoid.is_red_line) {
+            const cv::Point2d bl =
+              cv::Point2d(
+                static_cast<double>(g_red_avoid.bbox_img.x),
+                g_red_avoid.bottom_img.y) - div_base_img;
+            const cv::Point2d br =
+              cv::Point2d(
+                static_cast<double>(g_red_avoid.bbox_img.x + g_red_avoid.bbox_img.width),
+                g_red_avoid.bottom_img.y) - div_base_img;
+            const double cross_left = corridor_v.x * bl.y - corridor_v.y * bl.x;
+            const double cross_right = corridor_v.x * br.y - corridor_v.y * br.x;
+            const bool corridor_hits_zone_span =
+              (cross_left <= 0.0 && cross_right >= 0.0) ||
+              (cross_left >= 0.0 && cross_right <= 0.0);
+            if (corridor_hits_zone_span) {
+              lateral_distance = 0.0;
+            } else {
+              lateral_distance = std::min(
+                {std::abs(cross_left), std::abs(cross_center), std::abs(cross_right)}) /
+                corridor_norm;
+            }
+          } else {
+            lateral_distance = std::abs(cross_center) / corridor_norm;
+          }
         }
 
         const double corridor_limit =
@@ -1347,8 +1371,14 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         1.0 -
         (1.0 - lane_keep_min_factor) * risk;
 
-      const double edge_guard_start = red_edge_guard_start_error_;
-      const double edge_guard_full = red_edge_guard_full_error_;
+      const double edge_guard_start =
+        (enable_red_zone_lock_ && g_red_avoid.is_red_line) ?
+        std::max(red_edge_guard_start_error_, 0.22) :
+        red_edge_guard_start_error_;
+      const double edge_guard_full =
+        (enable_red_zone_lock_ && g_red_avoid.is_red_line) ?
+        std::max(red_edge_guard_full_error_, 0.42) :
+        red_edge_guard_full_error_;
       const double line_err =
         (result_opt && result_opt->line_detected) ? result_opt->error : 0.0;
       // result.error > 0 表示白道在右（车偏左靠近左黑线）；< 0 表示白道在左（车偏右靠近右黑线）
@@ -2270,19 +2300,31 @@ bool LineFollowerNode::detect_red(
         line_box_roi.height);
   }
 
-  // 合并禁行区优先于零散碎片；否则优先处理红锥，其次普通红线。
-  const bool use_red_line =
-    zone_found || (best_cone_index < 0 && best_line_index >= 0);
+  // 合并禁行区优先于零散碎片；但若存在更近且不与禁行区重叠的独立红锥，优先避让更近红锥。
+  bool prefer_zone = zone_found;
+  if (prefer_zone && best_cone_index >= 0) {
+    const cv::Rect cone_box =
+      cv::boundingRect(contours[static_cast<size_t>(best_cone_index)]);
+    const bool independent_cone = (cone_box & best_zone_box).area() == 0;
+    const bool cone_is_closer =
+      (cone_box.y + cone_box.height) > (best_zone_box.y + best_zone_box.height);
+    if (independent_cone && cone_is_closer) {
+      prefer_zone = false;
+    }
+  }
 
-  if (!zone_found && best_cone_index < 0 && best_line_index < 0) {
+  const bool use_red_line =
+    prefer_zone || (best_cone_index < 0 && best_line_index >= 0);
+
+  if (!prefer_zone && best_cone_index < 0 && best_line_index < 0) {
     return false;
   }
 
-  const cv::Rect box = zone_found ? best_zone_box :
+  const cv::Rect box = prefer_zone ? best_zone_box :
     cv::boundingRect(
       contours[static_cast<size_t>(use_red_line ? best_line_index : best_cone_index)]);
 
-  const double selected_area = zone_found ? best_zone_area :
+  const double selected_area = prefer_zone ? best_zone_area :
     (use_red_line ? best_line_area : best_cone_area);
 
   const double aspect_ratio =
@@ -2395,7 +2437,7 @@ bool LineFollowerNode::detect_red(
       0.0,
       1.0);
 
-  if (red_zone_lock_enabled) {
+  if (red_zone_lock_enabled && use_red_line) {
     if (g_red_avoid.dir_locked) {
       side_sign = g_red_avoid.locked_side_sign;
       g_red_avoid.dir_clear_frames = 0;
@@ -2404,6 +2446,9 @@ bool LineFollowerNode::detect_red(
       g_red_avoid.locked_side_sign = side_sign;
       g_red_avoid.dir_clear_frames = 0;
     }
+  } else if (red_zone_lock_enabled) {
+    // 普通红锥绝不沿用禁行区锁存方向，避免左右交替红锥时反向撞锥。
+    g_red_avoid.decay_lock(true, red_zone_lock_clear_frames_);
   } else {
     g_red_avoid.reset_lock();
   }
