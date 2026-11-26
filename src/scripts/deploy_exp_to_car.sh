@@ -154,7 +154,7 @@ echo "  车端编译: $([[ $NO_BUILD -eq 0 ]] && echo "执行 colcon build" || e
 if [[ $DRY_RUN -eq 1 ]]; then
   echo ""
   echo "[DRY-RUN] 1) 远端克隆与建目录:"
-  echo "  若不存在 $CAR_EXP_DIR 则 cp -a $CAR_BASE_DIR -> $CAR_EXP_DIR"
+  echo "  若不存在 ${CAR_EXP_DIR} 则 cp -a ${CAR_BASE_DIR} -> ${CAR_EXP_DIR}，并清理复制过来的 line_follow_ws/{build,install,log}"
   echo "  mkdir -p $REMOTE_INC $REMOTE_SRC $REMOTE_LAUNCH $REMOTE_PRESETS $REMOTE_SCRIPTS $REMOTE_MODEL_DIR"
   echo "[DRY-RUN] 2) 传输头文件 (${#HEADERS[@]} 个) -> $REMOTE_INC/"
   for f in "${HEADERS[@]}"; do echo "    - ${f#"$ROOT"/}"; done
@@ -213,6 +213,7 @@ ssh "${SSH_OPTS[@]}" "$CAR_HOST" "
       exit 1
     fi
     cp -a $Q_BASE $Q_EXP
+    rm -rf $Q_EXP/src/line_follow_ws/build $Q_EXP/src/line_follow_ws/install $Q_EXP/src/line_follow_ws/log
   fi
   mkdir -p $Q_INC $Q_SRC $Q_LAUNCH $Q_PRESETS $Q_SCRIPTS $Q_MODEL_DIR
 "
@@ -240,9 +241,14 @@ ssh "${SSH_OPTS[@]}" "$CAR_HOST" "chmod +x $Q_SCRIPTS/start_line_following.sh"
 if [[ $NO_BUILD -eq 0 ]]; then
   echo "[5/5] 在车端隔离目录执行一次性 colcon build..."
   printf -v Q_WS '%q' "$CAR_EXP_DIR/src/line_follow_ws"
+  printf -v Q_CMAKE_MATCH '%q' "CMAKE_HOME_DIRECTORY:INTERNAL=${CAR_EXP_DIR}/"
   ssh "${SSH_OPTS[@]}" "$CAR_HOST" "
     set -e
     cd $Q_WS
+    if [ -f build/line_follower/CMakeCache.txt ] && ! grep -Fq $Q_CMAKE_MATCH build/line_follower/CMakeCache.txt; then
+      echo '检测到旧路径 CMakeCache，清理 build/line_follower、install/line_follower 与 log...'
+      rm -rf build/line_follower install/line_follower log
+    fi
     set +u
     source /opt/tros/humble/setup.bash
     set -u
