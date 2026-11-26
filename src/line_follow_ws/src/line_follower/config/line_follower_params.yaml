@@ -108,6 +108,10 @@ line_follower_node:
     red_zone_aspect_ratio_max: 4.5
     red_zone_lock_clear_frames: 6
 
+    # 实验功能（默认关闭）：红线/红禁行区按左右剩余白道宽度选边绕行
+    enable_red_white_width_side: false
+    red_white_side_margin_px: 10.0
+
     # 单个红锥轮廓阈值。0.0006 对当前 640x480 / ROI 约等于几十~百像素量级。
     red_cone_area_ratio_threshold: 0.0006
     red_cone_min_bbox_width: 4

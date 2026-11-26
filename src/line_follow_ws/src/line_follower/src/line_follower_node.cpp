@@ -1,4 +1,5 @@
 #include "line_follower/line_follower_node.hpp"
+#include "line_follower/red_side_selector.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -291,6 +292,9 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("red_zone_aspect_ratio_min", 0.5);
   this->declare_parameter("red_zone_aspect_ratio_max", 4.5);
   this->declare_parameter("red_zone_lock_clear_frames", 6);
+  // 实验功能（默认关闭）：红线/红禁行区优先按左右剩余白道宽度选边绕行。
+  this->declare_parameter("enable_red_white_width_side", false);
+  this->declare_parameter("red_white_side_margin_px", 10.0);
 
   // 丢线不停车：超过 line_lost_stop_time 只切换 LOST 状态，仍低速前进。
   this->declare_parameter("line_lost_stop_time", 0.8);
@@ -426,6 +430,9 @@ void LineFollowerNode::declare_parameters()
   red_vote_frames_ = std::max<int>(1, this->get_parameter("red_vote_frames").as_int());
   red_divider_angle_deg_ = this->get_parameter("red_divider_angle_deg").as_double();
   red_divider_angle_rad_ = red_divider_angle_deg_ * (M_PI / 180.0);
+  enable_red_white_width_side_ = this->get_parameter("enable_red_white_width_side").as_bool();
+  red_white_side_margin_px_ =
+    std::max(0.0, this->get_parameter("red_white_side_margin_px").as_double());
 
   line_lost_stop_time_ = this->get_parameter("line_lost_stop_time").as_double();
   speed_gain_damping_ = this->get_parameter("speed_gain_damping").as_double();
@@ -761,7 +768,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     cv::Point2d red_center_img, div_base_img, div_target_img;
     bool red_seen = detect_red(
       frame_bgr, roi_top, roi_bottom, line_centroid_roi, side_sign,
-      red_center_img, div_base_img, div_target_img);
+      red_center_img, div_base_img, div_target_img, result_opt->binary_mask);
 
     last_red_overlay_valid_ = red_seen;
 
@@ -1896,7 +1903,7 @@ bool LineFollowerNode::detect_red(
   const cv::Mat & frame_bgr, int roi_top, int roi_bottom,
   const cv::Point2d & line_centroid_roi, double & side_sign,
   cv::Point2d & red_centroid_img, cv::Point2d & div_base_img,
-  cv::Point2d & div_target_img) const
+  cv::Point2d & div_target_img, const cv::Mat & white_mask) const
 {
   side_sign = 0.0;
 
@@ -2256,26 +2263,47 @@ bool LineFollowerNode::detect_red(
     red_centroid_roi - base;
 
   if (use_red_line) {
-    // 横向停车线通常横跨道路，单纯用中心点叉积会在中心附近左右抖动。
-    // 优先选择 bbox 两侧剩余空间更大的一边绕行；两边近似相等时使用固定方向。
-    const double left_space =
-      static_cast<double>(box.x);
-    const double right_space =
-      static_cast<double>(mask.cols - (box.x + box.width));
-
-    if (right_space > left_space + 10.0) {
-      // 右侧空间更大 -> 向右绕；按现有语义等价于“障碍在左”。
-      side_sign = -1.0;
-    } else if (left_space > right_space + 10.0) {
-      // 左侧空间更大 -> 向左绕。
-      side_sign = 1.0;
-    } else {
+    if (enable_red_white_width_side_ &&
+        !white_mask.empty() &&
+        white_mask.type() == CV_8UC1)
+    {
       const int fallback_direction =
         static_cast<int>(
           this->get_parameter("red_line_fallback_direction").as_int());
+      const auto selection = select_red_bypass_side_from_white_mask(
+        white_mask.data,
+        white_mask.cols,
+        white_mask.rows,
+        static_cast<int>(white_mask.step),
+        box.x,
+        box.y,
+        box.width,
+        box.height,
+        red_white_side_margin_px_,
+        fallback_direction);
+      side_sign = selection.side_sign;
+    } else {
+      // 横向停车线通常横跨道路，单纯用中心点叉积会在中心附近左右抖动。
+      // 优先选择 bbox 两侧剩余空间更大的一边绕行；两边近似相等时使用固定方向。
+      const double left_space =
+        static_cast<double>(box.x);
+      const double right_space =
+        static_cast<double>(mask.cols - (box.x + box.width));
 
-      // fallback_direction: -1=向右，+1=向左。
-      side_sign = fallback_direction >= 0 ? 1.0 : -1.0;
+      if (right_space > left_space + 10.0) {
+        // 右侧空间更大 -> 向右绕；按现有语义等价于“障碍在左”。
+        side_sign = -1.0;
+      } else if (left_space > right_space + 10.0) {
+        // 左侧空间更大 -> 向左绕。
+        side_sign = 1.0;
+      } else {
+        const int fallback_direction =
+          static_cast<int>(
+            this->get_parameter("red_line_fallback_direction").as_int());
+
+        // fallback_direction: -1=向右，+1=向左。
+        side_sign = fallback_direction >= 0 ? 1.0 : -1.0;
+      }
     }
   } else {
     // 图像坐标系 y 轴向下：

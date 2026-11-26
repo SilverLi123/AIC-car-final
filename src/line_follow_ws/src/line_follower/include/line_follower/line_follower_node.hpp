@@ -72,7 +72,8 @@ private:
     double & side_sign,
     cv::Point2d & red_centroid_img,
     cv::Point2d & div_base_img,
-    cv::Point2d & div_target_img) const;
+    cv::Point2d & div_target_img,
+    const cv::Mat & white_mask = cv::Mat()) const;
 
   std::string state_to_string(TrackState state) const;
 
@@ -215,6 +216,10 @@ private:
   int red_vote_frames_{8};
   double red_divider_angle_deg_{0.0};
   double red_divider_angle_rad_{0.0};
+
+  // 实验功能（默认关闭）：红线/红禁行区优先按左右剩余白道宽度选边绕行。
+  bool enable_red_white_width_side_{false};
+  double red_white_side_margin_px_{10.0};
 
   int red_left_votes_{0};
   int red_right_votes_{0};
