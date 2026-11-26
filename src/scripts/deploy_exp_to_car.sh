@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-click isolated deployment script for experimental line_follower features.
-# Syncs local experimental code, headers, presets, and optional v3 BPU model to
+# Syncs local experimental code, headers, presets, and optional original 11MB BPU model to
 # an isolated car directory (default: /home/sunrise/aic_car_final_exp) and builds
 # line_follower there without touching the baseline (/home/sunrise/aic_car_final).
 set -Eeuo pipefail
@@ -18,7 +18,7 @@ usage() {
   cat <<EOF
 用法: $(basename "$0") [选项]
 
-将实验版代码、4 个头文件、EXP_01~EXP_11 预设、启动脚本、YOLOv8 节点与 v3 BPU 模型
+将实验版代码、4 个头文件、EXP_01~EXP_11 预设、启动脚本、YOLOv8 节点与原始 YOLO BPU 模型 (src/yolov8/mod1/best_modified_yolov8.bin)
 同步到小车隔离实验目录（默认: ${CAR_EXP_DIR}），并在该目录执行一次性 colcon build。
 绝不修改现车基线目录（${CAR_BASE_DIR}）。
 
@@ -26,7 +26,7 @@ usage() {
   --host <user@ip>       指定小车 SSH 目标（默认: ${CAR_HOST}）
   --exp-dir <remote_dir> 指定小车隔离实验目录（默认: ${CAR_EXP_DIR}）
   --dry-run              仅校验本地文件并打印计划操作，不发起 SSH/SCP 连接
-  --skip-model           跳过传输 vision_pipeline/best_modified_yolov8_v3.bin
+  --skip-model           跳过传输 原始 YOLO BPU 模型 (src/yolov8/mod1/best_modified_yolov8.bin)
   --no-build             只同步文件，不在车端执行 colcon build
   -h, --help             显示本帮助信息
 EOF
@@ -100,7 +100,7 @@ BASE_YAML="$PKG_DIR/config/line_follower_params.yaml"
 PRESET_DIR="$PKG_DIR/config/parameter_presets"
 LAUNCHER_SCRIPT="$ROOT/src/scripts/start_line_following.sh"
 YOLO_SCRIPT="$ROOT/src/yolov8/bpu_yolov8_node.py"
-MODEL_BIN="$ROOT/vision_pipeline/best_modified_yolov8_v3.bin"
+MODEL_BIN="$ROOT/src/yolov8/mod1/best_modified_yolov8.bin"
 
 HEADERS=(
   "$INC_DIR/line_follower_node.hpp"
@@ -128,7 +128,7 @@ if [[ ${#EXP_PRESETS[@]} -eq 0 ]]; then
 fi
 
 if [[ $SKIP_MODEL -eq 0 && ! -f "$MODEL_BIN" ]]; then
-  echo "错误: 缺少 v3 BPU 模型文件: $MODEL_BIN（若暂不传模型可加 --skip-model）" >&2
+  echo "错误: 缺少原始 YOLO BPU 模型文件: $MODEL_BIN（若暂不传模型可加 --skip-model）" >&2
   exit 1
 fi
 
@@ -148,7 +148,7 @@ echo "  目标主机: $CAR_HOST"
 echo "  车端基线: $CAR_BASE_DIR (只读克隆源，绝不修改)"
 echo "  隔离目录: $CAR_EXP_DIR"
 echo "  实验预设: ${#EXP_PRESETS[@]} 份 (EXP_*.yaml)"
-echo "  v3 模型 : $([[ $SKIP_MODEL -eq 0 ]] && echo "同步 ($MODEL_BIN)" || echo "跳过 (--skip-model)")"
+echo "  YOLO模型: $([[ $SKIP_MODEL -eq 0 ]] && echo "同步原始 11MB ($MODEL_BIN)" || echo "跳过 (--skip-model)")"
 echo "  车端编译: $([[ $NO_BUILD -eq 0 ]] && echo "执行 colcon build" || echo "跳过 (--no-build)")"
 
 if [[ $DRY_RUN -eq 1 ]]; then
@@ -168,7 +168,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
   echo "[DRY-RUN] 5) 传输实验预设 (${#EXP_PRESETS[@]} 份) -> $REMOTE_PRESETS/"
   for f in "${EXP_PRESETS[@]}"; do echo "    - $(basename "$f")"; done
   if [[ $SKIP_MODEL -eq 0 ]]; then
-    echo "[DRY-RUN] 6) 传输 v3 BPU 模型 -> $REMOTE_MODEL_DIR/"
+    echo "[DRY-RUN] 6) 传输原始 YOLO BPU 模型 -> $REMOTE_MODEL_DIR/"
     echo "    - ${MODEL_BIN#"$ROOT"/}"
   fi
   echo "[DRY-RUN] 7) 设置可执行权限: chmod +x $REMOTE_SCRIPTS/start_line_following.sh"
@@ -230,10 +230,10 @@ scp "${SSH_OPTS[@]}" "$LAUNCHER_SCRIPT" "${CAR_HOST}:${REMOTE_SCRIPTS}/start_lin
 scp "${SSH_OPTS[@]}" "$YOLO_SCRIPT" "${CAR_HOST}:${REMOTE_YOLO}/bpu_yolov8_node.py"
 
 if [[ $SKIP_MODEL -eq 0 ]]; then
-  echo "[4/5] 同步 v3 BPU 模型 ($(basename "$MODEL_BIN"))..."
+  echo "[4/5] 同步原始 YOLO BPU 模型 (src/yolov8/mod1/best_modified_yolov8.bin)..."
   scp "${SSH_OPTS[@]}" "$MODEL_BIN" "${CAR_HOST}:${REMOTE_MODEL_DIR}/"
 else
-  echo "[4/5] 已跳过 v3 模型同步 (--skip-model)"
+  echo "[4/5] 已跳过原始 YOLO BPU 模型同步 (--skip-model)"
 fi
 
 ssh "${SSH_OPTS[@]}" "$CAR_HOST" "chmod +x $Q_SCRIPTS/start_line_following.sh"

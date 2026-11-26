@@ -41,7 +41,7 @@ usage() {
   --params <路径或文件名>  巡线参数 YAML；直接指定时不弹交互菜单
   --map ring|fork          选择对应地图菜单；与 --params 同用时校验配置归属
   --yolo                   同时启动 YOLO，并使用原版三节点巡线入口
-  --yolo-model <路径>      指定 YOLO .bin 模型路径（未指定且存在 mod1/best_modified_yolov8_v3.bin 时自动选用）
+  --yolo-model <路径>      指定 YOLO .bin 模型路径（默认使用 src/yolov8/mod1/best_modified_yolov8.bin）
   --yolo-roi-filter        开启 YOLO 顶部/极端异常框过滤（enable_roi_geo_filter=true）
   --finish-heading <JSON>  启用独立终点对正实验（需要已验证地面标定）
   --skip-chassis           底盘已在其他终端运行时跳过底盘启动
@@ -378,9 +378,6 @@ spawn camera "$CAMERA_DIR" python3 camera.py
 sleep 2
 if [[ "$START_YOLO" == true ]]; then
   YOLO_ARGS=()
-  if [[ -z "$YOLO_MODEL" && -f "$YOLO_DIR/mod1/best_modified_yolov8_v3.bin" ]]; then
-    YOLO_MODEL="$YOLO_DIR/mod1/best_modified_yolov8_v3.bin"
-  fi
   if [[ -n "$YOLO_MODEL" ]]; then
     if [[ "$YOLO_MODEL" != /* ]]; then
       YOLO_MODEL="$ROOT/$YOLO_MODEL"
