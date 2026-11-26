@@ -42,6 +42,7 @@ struct ProcessingResult
 
   cv::Mat roi_bgr;
   cv::Mat binary_mask;
+  cv::Mat roi_hsv;
 
   int roi_top{0};
   int roi_bottom{0};
@@ -75,7 +76,8 @@ private:
     cv::Point2d & red_centroid_img,
     cv::Point2d & div_base_img,
     cv::Point2d & div_target_img,
-    const cv::Mat & white_mask = cv::Mat()) const;
+    const cv::Mat & white_mask = cv::Mat(),
+    const cv::Mat & precomputed_hsv = cv::Mat()) const;
 
   std::string state_to_string(TrackState state) const;
 
@@ -228,6 +230,36 @@ private:
   bool enable_red_white_width_side_{false};
   double red_white_side_margin_px_{10.0};
 
+  // 软避障 / 红线分类 / 禁行区参数缓存（构造时一次读取，避免每帧 get_parameter）
+  bool enable_soft_red_avoidance_{false};
+  double red_soft_yaw_{0.30};
+  double red_near_ratio_{0.35};
+  double red_very_close_ratio_{0.72};
+  double red_corridor_half_width_ratio_{0.42};
+  double red_soft_speed_{0.15};
+  double red_soft_curve_yaw_limit_{0.15};
+  double red_line_aspect_ratio_min_{3.0};
+  double red_line_min_width_ratio_{0.30};
+  double red_cone_area_ratio_threshold_{0.0006};
+  int red_cone_min_bbox_width_{4};
+  int red_cone_min_bbox_height_{4};
+  double red_repulsion_gain_{1.5};
+  double red_lane_keep_min_factor_{0.40};
+  double red_edge_guard_start_error_{0.15};
+  double red_edge_guard_full_error_{0.30};
+  double red_min_forward_speed_{0.06};
+  int red_line_fallback_direction_{-1};
+  double red_line_soft_yaw_{0.35};
+  double red_line_speed_{0.12};
+
+  bool enable_red_zone_lock_{false};
+  int red_zone_close_kernel_w_{21};
+  int red_zone_close_kernel_h_{21};
+  double red_zone_min_width_ratio_{0.16};
+  double red_zone_aspect_ratio_min_{0.5};
+  double red_zone_aspect_ratio_max_{4.5};
+  int red_zone_lock_clear_frames_{6};
+
   int red_left_votes_{0};
   int red_right_votes_{0};
   bool red_turning_{false};
@@ -243,10 +275,26 @@ private:
   // Line state / runtime state
   // ============================================================
   double line_lost_stop_time_{0.8};
+  double line_lost_forward_speed_{0.06};
+  double line_lost_yaw_hold_factor_{0.85};
   double speed_gain_damping_{0.5};
   bool publish_debug_image_{true};
+  std::string debug_image_mode_{"always"};
+  bool reuse_process_hsv_for_red_{false};
+
+  bool enable_continuous_curve_assist_{false};
+  double reverse_curve_min_error_{0.12};
+  double reverse_curve_threshold_{0.35};
+  int reverse_curve_confirm_frames_{3};
+  int reverse_curve_clear_frames_{4};
+  double reverse_curve_speed_{0.16};
+  double sharp_curve_threshold_{0.50};
+  double sharp_curve_speed_{0.20};
 
   // Only used by the opt-in fork-map curve-preview experiment.
+  bool enable_curve_preview_steering_{false};
+  double curve_preview_max_far_weight_{0.45};
+  double curve_preview_yaw_slew_rate_{8.0};
   bool curve_preview_yaw_initialized_{false};
   double curve_preview_last_yaw_rate_{0.0};
   rclcpp::Time curve_preview_last_time_;

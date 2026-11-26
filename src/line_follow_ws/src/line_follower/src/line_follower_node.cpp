@@ -145,12 +145,12 @@ LineFollowerNode::LineFollowerNode()
     "Line follower subscribing to '%s', publishing cmd_vel on '%s', start_topic: '%s'",
     image_topic_.c_str(), cmd_vel_topic_.c_str(), start_topic_.c_str());
 
-  if (this->get_parameter("enable_curve_preview_steering").as_bool()) {
+  if (enable_curve_preview_steering_) {
     RCLCPP_WARN(
       this->get_logger(),
       "Fork curve-preview steering enabled: max_far_weight=%.2f, yaw_slew=%.2f rad/s",
-      this->get_parameter("curve_preview_max_far_weight").as_double(),
-      this->get_parameter("curve_preview_yaw_slew_rate").as_double());
+      curve_preview_max_far_weight_,
+      curve_preview_yaw_slew_rate_);
   }
 
   if (kd_ > 0.0) {
@@ -312,6 +312,9 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("line_lost_yaw_hold_factor", 0.85);
   this->declare_parameter("speed_gain_damping", 0.5);
   this->declare_parameter("publish_debug_image", true);
+  // 实验功能（默认关闭/兼容）：按需调试图("always"/"auto"/"never")与复用主流程HSV。
+  this->declare_parameter("debug_image_mode", "always");
+  this->declare_parameter("reuse_process_hsv_for_red", false);
 
   // 实验功能（默认关闭）：使用 YOLO 数字检测框屏蔽红/黄过滤中的彩色数字区域。
   this->declare_parameter("enable_yolo_digit_masking", false);
@@ -447,9 +450,101 @@ void LineFollowerNode::declare_parameters()
   red_white_side_margin_px_ =
     std::max(0.0, this->get_parameter("red_white_side_margin_px").as_double());
 
+  enable_continuous_curve_assist_ =
+    this->get_parameter("enable_continuous_curve_assist").as_bool();
+  reverse_curve_min_error_ =
+    std::max(0.0, this->get_parameter("reverse_curve_min_error").as_double());
+  reverse_curve_threshold_ =
+    std::max(0.0, this->get_parameter("reverse_curve_threshold").as_double());
+  reverse_curve_confirm_frames_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("reverse_curve_confirm_frames").as_int()));
+  reverse_curve_clear_frames_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("reverse_curve_clear_frames").as_int()));
+  reverse_curve_speed_ =
+    std::max(0.0, this->get_parameter("reverse_curve_speed").as_double());
+  sharp_curve_threshold_ =
+    std::max(0.0, this->get_parameter("sharp_curve_threshold").as_double());
+  sharp_curve_speed_ =
+    std::max(0.0, this->get_parameter("sharp_curve_speed").as_double());
+
+  enable_curve_preview_steering_ =
+    this->get_parameter("enable_curve_preview_steering").as_bool();
+  curve_preview_max_far_weight_ = clamp(
+    this->get_parameter("curve_preview_max_far_weight").as_double(), 0.30, 0.65);
+  curve_preview_yaw_slew_rate_ = std::max(
+    0.1, this->get_parameter("curve_preview_yaw_slew_rate").as_double());
+
+  enable_soft_red_avoidance_ =
+    this->get_parameter("enable_soft_red_avoidance").as_bool();
+  red_soft_yaw_ =
+    std::max(0.0, this->get_parameter("red_soft_yaw").as_double());
+  red_near_ratio_ = clamp(
+    this->get_parameter("red_near_ratio").as_double(), 0.0, 1.0);
+  red_very_close_ratio_ = clamp(
+    this->get_parameter("red_very_close_ratio").as_double(), 0.0, 1.0);
+  red_corridor_half_width_ratio_ = clamp(
+    this->get_parameter("red_corridor_half_width_ratio").as_double(), 0.0, 1.0);
+  red_soft_speed_ =
+    std::max(0.0, this->get_parameter("red_soft_speed").as_double());
+  red_soft_curve_yaw_limit_ = clamp(
+    this->get_parameter("red_soft_curve_yaw_limit").as_double(),
+    0.0,
+    std::max(0.0, max_yaw_rate_));
+
+  red_line_aspect_ratio_min_ = std::max(
+    1.0, this->get_parameter("red_line_aspect_ratio_min").as_double());
+  red_line_min_width_ratio_ = clamp(
+    this->get_parameter("red_line_min_width_ratio").as_double(), 0.0, 1.0);
+  red_cone_area_ratio_threshold_ = std::max(
+    0.0, this->get_parameter("red_cone_area_ratio_threshold").as_double());
+  red_cone_min_bbox_width_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("red_cone_min_bbox_width").as_int()));
+  red_cone_min_bbox_height_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("red_cone_min_bbox_height").as_int()));
+  red_repulsion_gain_ = std::max(
+    0.0, this->get_parameter("red_repulsion_gain").as_double());
+  red_lane_keep_min_factor_ = clamp(
+    this->get_parameter("red_lane_keep_min_factor").as_double(), 0.0, 1.0);
+  red_edge_guard_start_error_ = clamp(
+    this->get_parameter("red_edge_guard_start_error").as_double(), 0.0, 0.9);
+  red_edge_guard_full_error_ = clamp(
+    this->get_parameter("red_edge_guard_full_error").as_double(),
+    red_edge_guard_start_error_ + 0.02, 1.0);
+  red_min_forward_speed_ = std::max(
+    0.01, this->get_parameter("red_min_forward_speed").as_double());
+  red_line_fallback_direction_ = static_cast<int>(
+    this->get_parameter("red_line_fallback_direction").as_int());
+  red_line_soft_yaw_ = std::max(
+    0.0, this->get_parameter("red_line_soft_yaw").as_double());
+  red_line_speed_ = std::max(
+    0.0, this->get_parameter("red_line_speed").as_double());
+
+  enable_red_zone_lock_ =
+    this->get_parameter("enable_red_zone_lock").as_bool();
+  red_zone_close_kernel_w_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("red_zone_close_kernel_w").as_int()));
+  red_zone_close_kernel_h_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("red_zone_close_kernel_h").as_int()));
+  red_zone_min_width_ratio_ = clamp(
+    this->get_parameter("red_zone_min_width_ratio").as_double(), 0.0, 1.0);
+  red_zone_aspect_ratio_min_ = std::max(
+    0.1, this->get_parameter("red_zone_aspect_ratio_min").as_double());
+  red_zone_aspect_ratio_max_ = std::max(
+    red_zone_aspect_ratio_min_,
+    this->get_parameter("red_zone_aspect_ratio_max").as_double());
+  red_zone_lock_clear_frames_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
+
   line_lost_stop_time_ = this->get_parameter("line_lost_stop_time").as_double();
+  line_lost_forward_speed_ = std::max(
+    0.01, this->get_parameter("line_lost_forward_speed").as_double());
+  line_lost_yaw_hold_factor_ = clamp(
+    this->get_parameter("line_lost_yaw_hold_factor").as_double(), 0.0, 1.0);
   speed_gain_damping_ = this->get_parameter("speed_gain_damping").as_double();
   publish_debug_image_ = this->get_parameter("publish_debug_image").as_bool();
+  debug_image_mode_ = this->get_parameter("debug_image_mode").as_string();
+  reuse_process_hsv_for_red_ =
+    this->get_parameter("reuse_process_hsv_for_red").as_bool();
 
   enable_yolo_digit_masking_ = this->get_parameter("enable_yolo_digit_masking").as_bool();
   digit_mask_apply_to_yellow_ = this->get_parameter("digit_mask_apply_to_yellow").as_bool();
@@ -502,9 +597,19 @@ void LineFollowerNode::setup_interfaces()
       yellow_still_speed_mps_, yellow_still_hold_sec_, yellow_stop_max_duration_);
   }
 
-  if (publish_debug_image_) {
+  if (publish_debug_image_ && debug_image_mode_ != "never") {
     debug_pub_ = image_transport::create_publisher(this, debug_image_topic_);
     debug_enabled_ = true;
+  } else {
+    debug_enabled_ = false;
+  }
+
+  if (debug_image_mode_ == "auto" || reuse_process_hsv_for_red_) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Lightweighting active: debug_image_mode='%s', reuse_process_hsv_for_red=%s",
+      debug_image_mode_.c_str(),
+      reuse_process_hsv_for_red_ ? "true" : "false");
   }
 
   if (enable_yolo_digit_masking_) {
@@ -747,25 +852,16 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   // 4) 连续弯中的实际动态斥力在后面的控制融合区完成；
   // 5) 红色目标没有停车权限，只允许绕行和减速。
   // ============================================================
-  const bool soft_red_enabled =
-    this->get_parameter("enable_soft_red_avoidance").as_bool();
-  const double red_soft_yaw =
-    std::max(0.0, this->get_parameter("red_soft_yaw").as_double());
-  const double red_near_ratio = clamp(
-    this->get_parameter("red_near_ratio").as_double(), 0.0, 1.0);
-  const double red_very_close_ratio = clamp(
-    this->get_parameter("red_very_close_ratio").as_double(), 0.0, 1.0);
-  const double red_corridor_half_width_ratio = clamp(
-    this->get_parameter("red_corridor_half_width_ratio").as_double(), 0.0, 1.0);
-  const double red_soft_speed =
-    std::max(0.0, this->get_parameter("red_soft_speed").as_double());
-  const double red_min_forward_speed =
-    std::max(0.01, this->get_parameter("red_min_forward_speed").as_double());
+  const bool soft_red_enabled = enable_soft_red_avoidance_;
+  const double red_soft_yaw = red_soft_yaw_;
+  const double red_near_ratio = red_near_ratio_;
+  const double red_very_close_ratio = red_very_close_ratio_;
+  const double red_corridor_half_width_ratio = red_corridor_half_width_ratio_;
+  const double red_soft_speed = red_soft_speed_;
+  const double red_min_forward_speed = red_min_forward_speed_;
 
-  const double line_lost_forward_speed =
-    std::max(0.01, this->get_parameter("line_lost_forward_speed").as_double());
-  const double line_lost_yaw_hold_factor =
-    clamp(this->get_parameter("line_lost_yaw_hold_factor").as_double(), 0.0, 1.0);
+  const double line_lost_forward_speed = line_lost_forward_speed_;
+  const double line_lost_yaw_hold_factor = line_lost_yaw_hold_factor_;
 
   bool soft_red_active = false;
   double soft_red_yaw_bias = 0.0;
@@ -784,7 +880,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     cv::Point2d red_center_img, div_base_img, div_target_img;
     bool red_seen = detect_red(
       frame_bgr, roi_top, roi_bottom, line_centroid_roi, side_sign,
-      red_center_img, div_base_img, div_target_img, result_opt->binary_mask);
+      red_center_img, div_base_img, div_target_img,
+      result_opt->binary_mask, result_opt->roi_hsv);
 
     last_red_overlay_valid_ = red_seen;
 
@@ -864,7 +961,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
           // 红线与红锥使用不同的基础避障角速度，但都不允许停车。
           const double base_avoid_yaw =
             g_red_avoid.is_red_line ?
-            std::max(0.0, this->get_parameter("red_line_soft_yaw").as_double()) :
+            red_line_soft_yaw_ :
             red_soft_yaw;
 
           soft_red_yaw_bias =
@@ -897,8 +994,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       red_right_votes_ = 0;
 
       g_red_avoid.decay_lock(
-        this->get_parameter("enable_red_zone_lock").as_bool(),
-        static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
+        enable_red_zone_lock_,
+        red_zone_lock_clear_frames_);
 
       if (soft_red_enabled) {
         red_turning_ = false;
@@ -911,8 +1008,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     g_red_avoid.reset_frame();
 
     g_red_avoid.decay_lock(
-      enable_red_filter_ && this->get_parameter("enable_red_zone_lock").as_bool(),
-      static_cast<int>(this->get_parameter("red_zone_lock_clear_frames").as_int()));
+      enable_red_filter_ && enable_red_zone_lock_,
+      red_zone_lock_clear_frames_);
 
     if (soft_red_enabled) {
       red_left_votes_ = 0;
@@ -1135,18 +1232,11 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
       // 连续弯辅助只改变“特殊路段”的速度上限。
       // 普通弯仍保持原来的 70/30 目标点和 P 控制。
-      if (this->get_parameter("enable_continuous_curve_assist").as_bool()) {
-        const double reverse_curve_speed =
-          std::max(0.0, this->get_parameter("reverse_curve_speed").as_double());
-        const double sharp_curve_threshold =
-          std::max(0.0, this->get_parameter("sharp_curve_threshold").as_double());
-        const double sharp_curve_speed =
-          std::max(0.0, this->get_parameter("sharp_curve_speed").as_double());
-
+      if (enable_continuous_curve_assist_) {
         if (g_curve_assist.reverse_curve_active) {
-          speed_cmd = std::min(speed_cmd, reverse_curve_speed);
-        } else if (g_curve_assist.curve_level >= sharp_curve_threshold) {
-          speed_cmd = std::min(speed_cmd, sharp_curve_speed);
+          speed_cmd = std::min(speed_cmd, reverse_curve_speed_);
+        } else if (g_curve_assist.curve_level >= sharp_curve_threshold_) {
+          speed_cmd = std::min(speed_cmd, sharp_curve_speed_);
         }
       }
 
@@ -1220,16 +1310,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
       g_red_avoid.risk = risk;
 
-      const double repulsion_gain =
-        std::max(
-          0.0,
-          this->get_parameter("red_repulsion_gain").as_double());
-
-      const double lane_keep_min_factor =
-        clamp(
-          this->get_parameter("red_lane_keep_min_factor").as_double(),
-          0.0,
-          1.0);
+      const double repulsion_gain = red_repulsion_gain_;
+      const double lane_keep_min_factor = red_lane_keep_min_factor_;
 
       // 红色目标最低前进速度已在 image_callback 顶部读取。
 
@@ -1249,11 +1331,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       // risk 越高，允许的红锥修正逐渐增大到 max_yaw_rate_。
       // 不再使用“到某个阈值突然解除”的跳变方式。
       if (g_curve_assist.reverse_curve_active) {
-        const double curve_bias_limit =
-          clamp(
-            this->get_parameter("red_soft_curve_yaw_limit").as_double(),
-            0.0,
-            max_yaw_rate_);
+        const double curve_bias_limit = red_soft_curve_yaw_limit_;
 
         const double dynamic_limit =
           curve_bias_limit +
@@ -1269,11 +1347,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         1.0 -
         (1.0 - lane_keep_min_factor) * risk;
 
-      const double edge_guard_start = clamp(
-        this->get_parameter("red_edge_guard_start_error").as_double(), 0.0, 0.9);
-      const double edge_guard_full = clamp(
-        this->get_parameter("red_edge_guard_full_error").as_double(),
-        edge_guard_start + 0.02, 1.0);
+      const double edge_guard_start = red_edge_guard_start_error_;
+      const double edge_guard_full = red_edge_guard_full_error_;
       const double line_err =
         (result_opt && result_opt->line_detected) ? result_opt->error : 0.0;
       // result.error > 0 表示白道在右（车偏左靠近左黑线）；< 0 表示白道在左（车偏右靠近右黑线）
@@ -1318,7 +1393,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       // risk=1 -> 至少 red_min_forward_speed
       const double red_base_speed =
         g_red_avoid.is_red_line ?
-        std::max(0.0, this->get_parameter("red_line_speed").as_double()) :
+        red_line_speed_ :
         red_soft_speed;
 
       const double safe_speed =
@@ -1373,14 +1448,12 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
   // 岔路实验模式限制正常巡线转向指令的变化率，避免目标点切换造成机械跳变。
   // 停车、丢线、未启用预瞄及反向脉冲均绕过该限制。
-  const bool curve_preview_enabled =
-    this->get_parameter("enable_curve_preview_steering").as_bool();
+  const bool curve_preview_enabled = enable_curve_preview_steering_;
   if (curve_preview_enabled && current_state == TrackState::TRACKING &&
       result_opt && result_opt->line_detected && !publish_stop_cmd &&
       !reverse_brake_active_ && !red_turning_)
   {
-    const double slew_rate = std::max(
-      0.1, this->get_parameter("curve_preview_yaw_slew_rate").as_double());
+    const double slew_rate = curve_preview_yaw_slew_rate_;
     if (!curve_preview_yaw_initialized_) {
       curve_preview_last_yaw_rate_ = yaw_rate;
       curve_preview_yaw_initialized_ = true;
@@ -1570,6 +1643,9 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
   result.yellow_line_detected = yellow_line_detected;
   result.roi_bgr = roi.clone();
   result.binary_mask = binary.clone();
+  if (reuse_process_hsv_for_red_) {
+    result.roi_hsv = hsv;
+  }
   result.roi_top = roi_rect.y;
   result.roi_bottom = roi_rect.y + roi_rect.height;
 
@@ -1742,18 +1818,11 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
   //             差值也足够大，并连续确认若干帧后才进入。
   // 进入后先跟 near，避免 near/far 相互抵消；far 主要用于提前降速。
   // ============================================================
-  const bool curve_assist_enabled =
-    this->get_parameter("enable_continuous_curve_assist").as_bool();
-  const double reverse_curve_min_error =
-    std::max(0.0, this->get_parameter("reverse_curve_min_error").as_double());
-  const double reverse_curve_threshold =
-    std::max(0.0, this->get_parameter("reverse_curve_threshold").as_double());
-  const int reverse_curve_confirm_frames = std::max(
-    1, static_cast<int>(
-      this->get_parameter("reverse_curve_confirm_frames").as_int()));
-  const int reverse_curve_clear_frames = std::max(
-    1, static_cast<int>(
-      this->get_parameter("reverse_curve_clear_frames").as_int()));
+  const bool curve_assist_enabled = enable_continuous_curve_assist_;
+  const double reverse_curve_min_error = reverse_curve_min_error_;
+  const double reverse_curve_threshold = reverse_curve_threshold_;
+  const int reverse_curve_confirm_frames = reverse_curve_confirm_frames_;
+  const int reverse_curve_clear_frames = reverse_curve_clear_frames_;
 
   const bool near_valid = near_center.has_value();
   const bool far_valid = far_center.has_value();
@@ -1836,8 +1905,7 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
   bool local_target_valid = false;
 
   if (near_valid && far_valid) {
-    const bool curve_preview_enabled =
-      this->get_parameter("enable_curve_preview_steering").as_bool();
+    const bool curve_preview_enabled = enable_curve_preview_steering_;
     if (curve_preview_enabled) {
       // On an S bend, the near and far targets can point in opposite
       // directions. Use the far target to anticipate the next turn while the
@@ -1845,8 +1913,7 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
       // as the current turn becomes visible. Once the existing S-curve detector
       // confirms the transition, follow near only to avoid cancelling the
       // current turn with the next one.
-      const double max_far_weight = clamp(
-        this->get_parameter("curve_preview_max_far_weight").as_double(), 0.30, 0.65);
+      const double max_far_weight = curve_preview_max_far_weight_;
       double far_weight = 0.30;
       if (near_error * far_error < 0.0) {
         if (curve_assist_enabled && g_curve_assist.reverse_curve_active) {
@@ -1927,7 +1994,8 @@ bool LineFollowerNode::detect_red(
   const cv::Mat & frame_bgr, int roi_top, int roi_bottom,
   const cv::Point2d & line_centroid_roi, double & side_sign,
   cv::Point2d & red_centroid_img, cv::Point2d & div_base_img,
-  cv::Point2d & div_target_img, const cv::Mat & white_mask) const
+  cv::Point2d & div_target_img, const cv::Mat & white_mask,
+  const cv::Mat & precomputed_hsv) const
 {
   side_sign = 0.0;
 
@@ -1947,14 +2015,22 @@ bool LineFollowerNode::detect_red(
     frame_bgr.cols,
     roi_bottom - roi_top);
 
-  const cv::Mat roi =
-    frame_bgr(roi_rect);
-
   cv::Mat hsv;
-  cv::cvtColor(
-    roi,
-    hsv,
-    cv::COLOR_BGR2HSV);
+  if (reuse_process_hsv_for_red_ &&
+      !precomputed_hsv.empty() &&
+      precomputed_hsv.rows == roi_rect.height &&
+      precomputed_hsv.cols == frame_bgr.cols)
+  {
+    hsv = precomputed_hsv;
+  } else {
+    const cv::Mat roi =
+      frame_bgr(roi_rect);
+
+    cv::cvtColor(
+      roi,
+      hsv,
+      cv::COLOR_BGR2HSV);
+  }
 
   cv::Mat mask1;
   cv::Mat mask2;
@@ -2024,33 +2100,11 @@ bool LineFollowerNode::detect_red(
     return false;
   }
 
-  const double line_aspect_min =
-    std::max(
-      1.0,
-      this->get_parameter("red_line_aspect_ratio_min").as_double());
-
-  const double line_width_ratio_min =
-    clamp(
-      this->get_parameter("red_line_min_width_ratio").as_double(),
-      0.0,
-      1.0);
-
-  const double cone_area_ratio_min =
-    std::max(
-      0.0,
-      this->get_parameter("red_cone_area_ratio_threshold").as_double());
-
-  const int cone_min_bbox_width =
-    std::max(
-      1,
-      static_cast<int>(
-        this->get_parameter("red_cone_min_bbox_width").as_int()));
-
-  const int cone_min_bbox_height =
-    std::max(
-      1,
-      static_cast<int>(
-        this->get_parameter("red_cone_min_bbox_height").as_int()));
+  const double line_aspect_min = red_line_aspect_ratio_min_;
+  const double line_width_ratio_min = red_line_min_width_ratio_;
+  const double cone_area_ratio_min = red_cone_area_ratio_threshold_;
+  const int cone_min_bbox_width = red_cone_min_bbox_width_;
+  const int cone_min_bbox_height = red_cone_min_bbox_height_;
 
   int best_cone_index = -1;
   double best_cone_area = 0.0;
@@ -2063,24 +2117,18 @@ bool LineFollowerNode::detect_red(
       1.0,
       static_cast<double>(mask.total()));
 
-  const bool red_zone_lock_enabled =
-    this->get_parameter("enable_red_zone_lock").as_bool();
+  const bool red_zone_lock_enabled = enable_red_zone_lock_;
 
   bool zone_found = false;
   cv::Rect best_zone_box{};
   double best_zone_area = 0.0;
 
   if (red_zone_lock_enabled) {
-    const int zone_kw = std::max(
-      1, static_cast<int>(this->get_parameter("red_zone_close_kernel_w").as_int()));
-    const int zone_kh = std::max(
-      1, static_cast<int>(this->get_parameter("red_zone_close_kernel_h").as_int()));
-    const double zone_min_w_ratio = clamp(
-      this->get_parameter("red_zone_min_width_ratio").as_double(), 0.0, 1.0);
-    const double zone_aspect_min = std::max(
-      0.1, this->get_parameter("red_zone_aspect_ratio_min").as_double());
-    const double zone_aspect_max = std::max(
-      zone_aspect_min, this->get_parameter("red_zone_aspect_ratio_max").as_double());
+    const int zone_kw = red_zone_close_kernel_w_;
+    const int zone_kh = red_zone_close_kernel_h_;
+    const double zone_min_w_ratio = red_zone_min_width_ratio_;
+    const double zone_aspect_min = red_zone_aspect_ratio_min_;
+    const double zone_aspect_max = red_zone_aspect_ratio_max_;
 
     cv::Mat zone_mask;
     const cv::Mat zone_kernel =
@@ -2291,9 +2339,6 @@ bool LineFollowerNode::detect_red(
         !white_mask.empty() &&
         white_mask.type() == CV_8UC1)
     {
-      const int fallback_direction =
-        static_cast<int>(
-          this->get_parameter("red_line_fallback_direction").as_int());
       const auto selection = select_red_bypass_side_from_white_mask(
         white_mask.data,
         white_mask.cols,
@@ -2304,7 +2349,7 @@ bool LineFollowerNode::detect_red(
         box.width,
         box.height,
         red_white_side_margin_px_,
-        fallback_direction);
+        red_line_fallback_direction_);
       side_sign = selection.side_sign;
     } else {
       // 横向停车线通常横跨道路，单纯用中心点叉积会在中心附近左右抖动。
@@ -2321,12 +2366,8 @@ bool LineFollowerNode::detect_red(
         // 左侧空间更大 -> 向左绕。
         side_sign = 1.0;
       } else {
-        const int fallback_direction =
-          static_cast<int>(
-            this->get_parameter("red_line_fallback_direction").as_int());
-
         // fallback_direction: -1=向右，+1=向左。
-        side_sign = fallback_direction >= 0 ? 1.0 : -1.0;
+        side_sign = red_line_fallback_direction_ >= 0 ? 1.0 : -1.0;
       }
     }
   } else {
@@ -2355,12 +2396,10 @@ bool LineFollowerNode::detect_red(
       1.0);
 
   if (red_zone_lock_enabled) {
-    const double lock_near_ratio = clamp(
-      this->get_parameter("red_near_ratio").as_double(), 0.0, 1.0);
     if (g_red_avoid.dir_locked) {
       side_sign = g_red_avoid.locked_side_sign;
       g_red_avoid.dir_clear_frames = 0;
-    } else if (computed_bottom_ratio >= lock_near_ratio) {
+    } else if (computed_bottom_ratio >= red_near_ratio_) {
       g_red_avoid.dir_locked = true;
       g_red_avoid.locked_side_sign = side_sign;
       g_red_avoid.dir_clear_frames = 0;
@@ -2474,6 +2513,9 @@ void LineFollowerNode::publish_debug_image(
   const ProcessingResult & result) const
 {
   if (!debug_enabled_ || result.binary_mask.empty()) {
+    return;
+  }
+  if (debug_image_mode_ == "auto" && debug_pub_.getNumSubscribers() == 0) {
     return;
   }
 
@@ -2609,7 +2651,7 @@ void LineFollowerNode::publish_debug_image(
     }
   }
 
-  if (this->get_parameter("enable_continuous_curve_assist").as_bool()) {
+  if (enable_continuous_curve_assist_) {
     const char * curve_mode =
       g_curve_assist.reverse_curve_active ? "REV_CURVE" : "NORMAL";
     char curve_text[160];

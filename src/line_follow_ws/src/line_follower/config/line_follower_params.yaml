@@ -154,6 +154,9 @@ line_follower_node:
     line_lost_yaw_hold_factor: 0.85
     speed_gain_damping: 0.65
     publish_debug_image: true
+    # 实验功能（默认关闭/保持兼容）：按需发布调试图("always"/"auto"/"never")与复用主流程HSV
+    debug_image_mode: "always"
+    reuse_process_hsv_for_red: false
 
     # 实验功能（默认关闭）：红/黄过滤屏蔽 YOLO 数字框，防止彩色底数字误触发
     enable_yolo_digit_masking: false
