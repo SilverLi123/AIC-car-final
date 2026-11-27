@@ -61,7 +61,7 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "  - $LOCAL_SCRIPTS -> $REMOTE_DIR/src/scripts"
   echo "  - $LOCAL_YOLO & mod1 .bin -> $REMOTE_DIR/src/yolov8/"
   echo "  - yolo/ (v3/v5 .bin + README.md) -> $REMOTE_DIR/yolo/"
-  echo "  - README.md -> $REMOTE_DIR/README.md"
+  echo "  - README.md & handoff.md -> $REMOTE_DIR/"
   exit 0
 fi
 
@@ -124,6 +124,7 @@ if [[ "$USE_RSYNC" == true ]]; then
   rsync -az "$LOCAL_YOLO" "$HOST:$REMOTE_DIR/src/yolov8/bpu_yolov8_node.py"
   [[ -f "$LOCAL_YOLO_BIN" ]] && rsync -az "$LOCAL_YOLO_BIN" "$HOST:$REMOTE_DIR/src/yolov8/mod1/best_modified_yolov8.bin"
   rsync -az "$ROOT/README.md" "$HOST:$REMOTE_DIR/README.md"
+  [[ -f "$ROOT/handoff.md" ]] && rsync -az "$ROOT/handoff.md" "$HOST:$REMOTE_DIR/handoff.md"
   if [[ -d "$ROOT/yolo" ]]; then
     rsync -az \
       --include 'README.md' \
@@ -143,6 +144,7 @@ else
   scp -o ConnectTimeout=5 "$LOCAL_YOLO" "$HOST:$REMOTE_DIR/src/yolov8/bpu_yolov8_node.py"
   [[ -f "$LOCAL_YOLO_BIN" ]] && scp -o ConnectTimeout=5 "$LOCAL_YOLO_BIN" "$HOST:$REMOTE_DIR/src/yolov8/mod1/best_modified_yolov8.bin"
   scp -o ConnectTimeout=5 "$ROOT/README.md" "$HOST:$REMOTE_DIR/README.md"
+  [[ -f "$ROOT/handoff.md" ]] && scp -o ConnectTimeout=5 "$ROOT/handoff.md" "$HOST:$REMOTE_DIR/handoff.md"
   if [[ -d "$ROOT/yolo" ]]; then
     tar -C "$ROOT/yolo" \
       --exclude='*.pt' --exclude='*.log' \
