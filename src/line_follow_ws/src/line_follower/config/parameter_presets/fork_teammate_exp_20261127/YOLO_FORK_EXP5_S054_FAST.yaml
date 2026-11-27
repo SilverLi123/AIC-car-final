@@ -73,7 +73,7 @@ line_follower_node:
     red_v_min: 70
     red_area_ratio_threshold: 0.0035
     red_divider_angle_deg: 8.0
-    red_vote_frames: 3
+    red_vote_frames: 2
     red_line_aspect_ratio_min: 3.0
     red_line_min_width_ratio: 0.30
     red_line_fallback_direction: -1
@@ -86,7 +86,7 @@ line_follower_node:
     enable_soft_red_avoidance: true
     red_soft_yaw: 0.18
     red_repulsion_gain: 0.90
-    red_near_ratio: 0.22
+    red_near_ratio: 0.30
     red_very_close_ratio: 0.62
     red_corridor_half_width_ratio: 0.42
     red_soft_curve_yaw_limit: 0.28
@@ -97,7 +97,7 @@ line_follower_node:
     enable_red_zone_cluster: true
     red_zone_min_width_ratio: 0.10
     red_zone_min_pixels: 120
-    red_zone_near_ratio: 0.26
+    red_zone_near_ratio: 0.34
     red_zone_soft_yaw: 0.22
     red_latch_clear_frames: 5
     red_soft_speed: 0.28
