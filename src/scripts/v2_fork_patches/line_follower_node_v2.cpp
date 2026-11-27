@@ -62,6 +62,7 @@ struct RedAvoidRuntime
   double gap_right_l{0.0};
   double gap_right_r{0.0};
   double w_right_px{0.0};
+  bool edge_clipped{false};
 };
 
 RedAvoidRuntime g_red_avoid;
@@ -736,9 +737,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       const bool stale_opposite_latch =
         (red_committed_dir_ > 0 && box_right_x < road_cx + 15.0) ||
         (red_committed_dir_ < 0 && box_left_x > road_cx - 15.0) ||
-        (red_committed_dir_ > 0 && g_red_avoid.w_left_px < 35.0 &&
+        (!g_red_avoid.edge_clipped && red_committed_dir_ > 0 && g_red_avoid.w_left_px < 35.0 &&
          g_red_avoid.w_right_px >= g_red_avoid.w_left_px + 60.0) ||
-        (red_committed_dir_ < 0 && g_red_avoid.w_right_px < 35.0 &&
+        (!g_red_avoid.edge_clipped && red_committed_dir_ < 0 && g_red_avoid.w_right_px < 35.0 &&
          g_red_avoid.w_left_px >= g_red_avoid.w_right_px + 60.0);
       if (red_committed_dir_ != 0 &&
           (stale_opposite_latch ||
@@ -750,6 +751,10 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         red_right_votes_ = 0;
       }
 
+      const bool hold_clipped_cone =
+        (!g_red_avoid.is_red_zone && !g_red_avoid.is_red_line &&
+         g_red_avoid.edge_clipped && red_committed_dir_ == 0 && red_bottom_ratio < 0.65);
+
       // 一旦进入近场主动避让（同目标连续跟踪且未完全越过中心线），锁存本次绕行方向，杜绝过锥中段 180° 符号翻转。
       if (soft_red_enabled && red_committed_dir_ != 0 &&
           red_bottom_ratio >= eff_near_ratio * 0.85)
@@ -757,12 +762,14 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         side_sign = static_cast<double>(red_committed_dir_);
       }
 
-      if (side_sign < 0.0) {
-        red_left_votes_++;
-        red_right_votes_ = 0;
-      } else {
-        red_right_votes_++;
-        red_left_votes_ = 0;
+      if (!hold_clipped_cone) {
+        if (side_sign < 0.0) {
+          red_left_votes_++;
+          red_right_votes_ = 0;
+        } else {
+          red_right_votes_++;
+          red_left_votes_ = 0;
+        }
       }
 
       if (soft_red_enabled) {
@@ -798,7 +805,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         const double red_right_ratio =
           static_cast<double>(g_red_avoid.bbox_img.x + g_red_avoid.bbox_img.width) / frame_w;
         const double clear_margin =
-          g_red_avoid.is_red_zone ? 0.33 : (g_red_avoid.is_red_line ? 0.22 : 0.10);
+          g_red_avoid.is_red_zone ? 0.33 : (g_red_avoid.is_red_line ? 0.22 : 0.14);
         const bool red_still_blocking =
           (side_sign < 0.0) ? (red_right_ratio >= clear_margin) : (red_left_ratio <= 1.0 - clear_margin);
         g_red_avoid.still_blocking = red_still_blocking;
@@ -809,7 +816,8 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
           (!g_red_avoid.is_red_line && !g_red_avoid.is_red_zone &&
            chosen_gw >= 35.0 && chosen_gw < 0.46 * frame_w);
 
-        if (vote_confirmed &&
+        if (!hold_clipped_cone &&
+            vote_confirmed &&
             red_close &&
             red_still_blocking &&
             (red_in_corridor || red_very_close || narrow_cone_gap))
@@ -817,8 +825,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
           soft_red_active = true;
           red_clear_frames_ = 0;
 
-          // 进入近距主动避让区后锁存本次目标绕行方向（锥桶 >= eff+0.12，避免入弯前过早错锁）
-          const double latch_margin = g_red_avoid.is_red_zone ? 0.04 : 0.12;
+          // 进入近距主动避让区后锁存本次目标绕行方向
+          const double latch_margin =
+            g_red_avoid.is_red_zone ? 0.04 : (g_red_avoid.edge_clipped ? 0.15 : 0.02);
           if (red_committed_dir_ == 0 && red_bottom_ratio >= eff_near_ratio + latch_margin) {
             red_committed_dir_ = (side_sign < 0.0) ? -1 : 1;
             red_latch_cx_ = obs_cx_norm;
@@ -1386,15 +1395,13 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         if (g_red_avoid.is_red_zone) {
           gap_yaw = clamp(gap_yaw, -0.38, 0.38);
         } else {
-          const double inward_cap = (bottom_ratio < 0.92) ? 0.62 : 0.95;
-          if (red_on_left) {
-            gap_yaw = clamp(gap_yaw, -1.15, inward_cap);
-          } else {
-            gap_yaw = clamp(gap_yaw, -inward_cap, 1.15);
-          }
+          gap_yaw = clamp(gap_yaw, -1.30, 1.30);
         }
         yaw_rate = clamp(gap_yaw, -max_yaw_rate_, max_yaw_rate_);
       } else {
+        if (!g_red_avoid.is_red_line && !g_red_avoid.is_red_zone && red_committed_dir_ != 0) {
+          repulsion_strength = std::max(repulsion_strength, 0.85);
+        }
         if (red_on_left) {
           if (yaw_rate > 0.0) {
             yaw_rate = yaw_rate * effective_lane_keep_factor - repulsion_strength;
@@ -2366,13 +2373,27 @@ bool LineFollowerNode::detect_red(
   const double cross = v_line.x * v_red.y - v_line.y * v_red.x;
   const double signed_lat_px = cross / v_line_norm;
 
-  // Measure contiguous unbridged white passable gap to the left & right of box base.
+  g_red_avoid.edge_clipped =
+    (!use_red_line && !use_red_zone &&
+     (box.x <= 12 || (box.x + box.width) >= roi_w - 12));
+
+  // Measure contiguous unbridged white passable gap to the left & right of obstacle.
   if (!result.binary_mask.empty()) {
-    const int by1 = std::clamp(box.y + box.height + 6, 1, roi_h);
-    const int band_h = std::clamp(box.height / 3, 18, 36);
-    const int by0 = std::clamp(by1 - band_h, 0, by1 - 1);
+    int by0 = 0;
+    int by1 = 1;
+    if (use_red_zone || use_red_line) {
+      by1 = std::clamp(box.y + box.height + 6, 1, roi_h);
+      const int band_h = std::clamp(box.height / 3, 18, 36);
+      by0 = std::clamp(by1 - band_h, 0, by1 - 1);
+    } else {
+      by0 = std::clamp(box.y + static_cast<int>(static_cast<double>(box.height) * 0.55), 0, roi_h - 2);
+      by1 = std::clamp(
+        std::max(by0 + 8, box.y + static_cast<int>(static_cast<double>(box.height) * 0.85)),
+        by0 + 1, roi_h);
+    }
     const cv::Mat base_band = result.binary_mask(cv::Rect(0, by0, roi_w, by1 - by0));
-    const int col_req = std::max(1, static_cast<int>(std::ceil(static_cast<double>(base_band.rows) * 0.30)));
+    const double req_ratio = (use_red_zone || use_red_line) ? 0.30 : 0.25;
+    const int col_req = std::max(1, static_cast<int>(std::ceil(static_cast<double>(base_band.rows) * req_ratio)));
 
     auto is_col_white = [&](int cx) -> bool {
       return cv::countNonZero(base_band.col(cx)) >= col_req;
