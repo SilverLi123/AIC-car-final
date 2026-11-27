@@ -143,13 +143,13 @@ detection_turn_controller:
     min_winner_share: 0.50
     min_winner_count: 2
     min_turn_x_diff: 0.08
-    enable_inlane_centering: true
+    enable_inlane_centering: false
     pair_early_margin: 0.070
-    inlane_yaw_gain: 3.60
+    inlane_yaw_gain: 1.85
     inlane_turn_linear: 0.36
     inlane_turn_duration: 1.75
-    inlane_rollover_hold: 0.52
-    inlane_edge_guard: 0.28
+    inlane_rollover_hold: 0.25
+    inlane_edge_guard: 0.14
     require_start_signal: true
     line_centroid_topic: "line_follower/centroid"
     centroid_timeout: 0.5
