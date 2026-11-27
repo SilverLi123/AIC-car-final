@@ -312,17 +312,17 @@ def parse_rosout_events(messages: Sequence[Tuple[float, str]]) -> Dict[str, Any]
     lost_warnings = 0
 
     digit_pat = re.compile(
-        r"(?:Triggering\s+turn|Pair\s+decision|Triggered\s+turn).*?(?:digit|winner|chosen)\s*[:=]\s*([0-9]+)",
+        r"(?:\[digit\s+turn\][^\n]*?best|(?:Triggering\s+turn|Pair\s+decision|Triggered\s+turn)[^\n]*?(?:digit|winner|chosen))\s*[:=]\s*([0-9]+)",
         re.IGNORECASE,
     )
-    conf_pat = re.compile(r"conf\s*[:=]\s*([0-9.]+)", re.IGNORECASE)
-    share_pat = re.compile(r"share\s*[:=]\s*([0-9.]+)", re.IGNORECASE)
+    conf_pat = re.compile(r"\bconf(?:_sum)?\s*[:=]\s*([0-9.]+)", re.IGNORECASE)
+    share_pat = re.compile(r"\bshare\s*[:=]\s*([0-9.]+)", re.IGNORECASE)
 
     for ts, msg in messages:
         lower = msg.lower()
         if "yellow" in lower and ("stop" in lower or "brake" in lower):
             yellow_stops.append(round(ts, 3))
-        if "t-junction" in lower or "tjunction" in lower:
+        if "t-junction" in lower or "tjunction" in lower or "[t-merge]" in lower:
             if "armed" in lower:
                 tjunction_armed += 1
             if "trigger" in lower or "enter" in lower or "merge turn" in lower:

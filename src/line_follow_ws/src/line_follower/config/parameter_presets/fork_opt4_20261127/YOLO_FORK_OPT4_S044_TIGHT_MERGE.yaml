@@ -120,23 +120,23 @@ line_follower_node:
     tjunction_arm_yellow_count: 2
     tjunction_branch_trigger_sign: -1
     tjunction_merge_direction: -1
-    tjunction_min_arm_dist: 0.25
-    tjunction_min_arm_time: 0.75
+    tjunction_min_arm_dist: 1.25
+    tjunction_min_arm_time: 1.6
     tjunction_confirm_frames: 1
-    tjunction_max_upper_road_ratio: 0.30
-    tjunction_min_wide_row_ratio: 0.24
-    tjunction_min_row_span_ratio: 0.68
+    tjunction_max_upper_road_ratio: 0.40
+    tjunction_min_wide_row_ratio: 0.22
+    tjunction_min_row_span_ratio: 0.65
     tjunction_left_edge_max_ratio: 0.22
     tjunction_right_edge_min_ratio: 0.78
     tjunction_min_top_dark_ratio: 0.70
     tjunction_rescue_upper_road_ratio: 0.12
     tjunction_rescue_total_road_ratio: 0.28
-    tjunction_merge_speed: 0.16
-    tjunction_merge_yaw_rate: 1.60
-    tjunction_min_turn_duration: 0.78
-    tjunction_max_turn_duration: 1.85
-    tjunction_exit_upper_road_ratio: 0.30
-    tjunction_exit_max_wide_row_ratio: 0.35
+    tjunction_merge_speed: 0.22
+    tjunction_merge_yaw_rate: 1.75
+    tjunction_min_turn_duration: 1.15
+    tjunction_max_turn_duration: 2.80
+    tjunction_exit_upper_road_ratio: 0.55
+    tjunction_exit_max_wide_row_ratio: 1.01
 
     line_lost_stop_time: 0.8
     line_lost_forward_speed: 0.30

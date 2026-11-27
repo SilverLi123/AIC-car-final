@@ -92,16 +92,20 @@ class TestAnalyzeBagHelpers(unittest.TestCase):
         logs = [
             (2.1, "Yellow stop line #2 detected, reverse brake engaged"),
             (3.4, "Pair decision chosen=6 conf=0.82 share=0.95"),
+            (4.5, "[digit turn][robust:fork] best:8 votes:3 conf_sum:1.39 x:0.70 y:0.51 dur:0.48s lin:0.22 ang:-0.35"),
+            (5.0, "[T-merge] Inner branch armed (yellow=2, det_w=-0.35, dist=2.60m)."),
             (7.0, "T-junction arm armed after yellow #2"),
-            (8.2, "T-junction merge turn triggered (dark_top=0.81)"),
-            (9.1, "T-junction exit completed"),
+            (8.2, "[T-merge] Triggered (wall): upper=0.01, wide=0.32 -> v=0.14 w=-1.45"),
+            (9.1, "[T-merge] Completed (upper=0.85, wide=0.90). Returning to closed-loop PD."),
         ]
         ev = analyze_bag_mod.parse_rosout_events(logs)
         self.assertEqual(ev["yellow_stop_logs"], 1)
-        self.assertEqual(len(ev["digit_turns"]), 1)
+        self.assertEqual(len(ev["digit_turns"]), 2)
         self.assertEqual(ev["digit_turns"][0]["digit"], 6)
         self.assertAlmostEqual(ev["digit_turns"][0]["conf"], 0.82, places=2)
-        self.assertEqual(ev["tjunction_armed"], 1)
+        self.assertEqual(ev["digit_turns"][1]["digit"], 8)
+        self.assertAlmostEqual(ev["digit_turns"][1]["conf"], 1.39, places=2)
+        self.assertEqual(ev["tjunction_armed"], 2)
         self.assertEqual(ev["tjunction_triggered"], 1)
         self.assertEqual(ev["tjunction_exited"], 1)
 
