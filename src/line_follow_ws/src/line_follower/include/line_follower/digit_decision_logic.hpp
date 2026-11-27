@@ -29,6 +29,13 @@ struct RobustDecisionConfig
   double pair_x_sep_min{0.12};
   double post_yellow_window_sec{3.5};
 
+  // Optional paired-slot anti-premature-trigger & anti-glare memory (opt-in: 0.0 / false = off).
+  double pair_hold_sec{0.0};
+  double pair_release_y{0.68};
+  double slot_memory_sec{0.0};
+  bool enforce_global_max_veto{false};
+  double max_veto_min_conf{0.60};
+
   double turn_direction_sign{-1.0};
   double yaw_gain{1.6};
   double fork_turn_linear{0.20};
@@ -74,11 +81,15 @@ public:
   void reset_session()
   {
     window_.clear();
+    slot_mem_[0] = RememberedSlot{};
+    slot_mem_[1] = RememberedSlot{};
+    solo_hold_active_ = false;
+    solo_hold_start_sec_ = 0.0;
   }
 
   void reset_all()
   {
-    window_.clear();
+    reset_session();
     active_turn_ = false;
     target_digit_ = -1;
     target_x_norm_ = 0.5;
@@ -119,6 +130,16 @@ public:
       window_.pop_front();
     }
 
+    // Prune expired remembered slots.
+    for (auto & s : slot_mem_) {
+      if (s.valid && (cfg_.slot_memory_sec <= 0.0 ||
+                      (now_sec - s.last_seen_sec) > cfg_.slot_memory_sec ||
+                      now_sec < s.last_seen_sec))
+      {
+        s = RememberedSlot{};
+      }
+    }
+
     struct ObsWithFrame
     {
       DigitCandidate c;
@@ -152,17 +173,6 @@ public:
         split_idx = i;
       }
     }
-
-    struct SlotWinner
-    {
-      bool valid{false};
-      int digit{-1};
-      int votes{0};
-      double total_conf{0.0};
-      double mean_x{0.5};
-      double mean_y{0.5};
-      double max_y{0.0};
-    };
 
     auto eval_slot = [&](size_t begin_idx, size_t end_idx) -> SlotWinner {
       SlotWinner res;
@@ -229,25 +239,98 @@ public:
       return res;
     };
 
-    const SlotWinner left_slot = eval_slot(0, split_idx);
-    const SlotWinner right_slot = eval_slot(split_idx, all_obs.size());
+    const SlotWinner cur_a = eval_slot(0, split_idx);
+    const SlotWinner cur_b = eval_slot(split_idx, all_obs.size());
 
-    SlotWinner chosen;
-    if (left_slot.valid && right_slot.valid) {
-      if (left_slot.digit > right_slot.digit ||
-          (left_slot.digit == right_slot.digit && left_slot.total_conf >= right_slot.total_conf))
-      {
-        chosen = left_slot;
-      } else {
-        chosen = right_slot;
+    auto pick_better = [](const SlotWinner & a, const SlotWinner & b) -> SlotWinner {
+      if (!b.valid) {
+        return a;
       }
-    } else if (left_slot.valid) {
-      chosen = left_slot;
-    } else if (right_slot.valid) {
-      chosen = right_slot;
+      if (!a.valid) {
+        return b;
+      }
+      if (a.digit != b.digit) {
+        return (a.digit > b.digit) ? a : b;
+      }
+      return (a.total_conf >= b.total_conf) ? a : b;
+    };
+
+    auto remember_slot = [&](size_t idx, const SlotWinner & w) {
+      slot_mem_[idx].valid = true;
+      slot_mem_[idx].winner = w;
+      slot_mem_[idx].last_seen_sec = now_sec;
+    };
+
+    int confirmed_slots = 0;
+    SlotWinner chosen;
+
+    if (cur_a.valid && cur_b.valid) {
+      remember_slot(0, cur_a);
+      remember_slot(1, cur_b);
+      chosen = pick_better(cur_a, cur_b);
+      confirmed_slots = 2;
+    } else if (cur_a.valid || cur_b.valid) {
+      const SlotWinner cur = cur_a.valid ? cur_a : cur_b;
+      confirmed_slots = 1;
+      chosen = cur;
+
+      if (cfg_.slot_memory_sec > 0.0) {
+        // Match against existing memory slot if within separation threshold; otherwise place by side.
+        size_t target_idx = (cur.mean_x < 0.5) ? 0 : 1;
+        double best_dist = 1e9;
+        for (size_t idx = 0; idx < 2; ++idx) {
+          if (slot_mem_[idx].valid) {
+            const double d = std::abs(slot_mem_[idx].winner.mean_x - cur.mean_x);
+            if (d < cfg_.pair_x_sep_min && d < best_dist) {
+              best_dist = d;
+              target_idx = idx;
+            }
+          }
+        }
+        const size_t partner_idx = 1 - target_idx;
+        if (slot_mem_[partner_idx].valid &&
+            std::abs(slot_mem_[partner_idx].winner.mean_x - cur.mean_x) >= cfg_.pair_x_sep_min)
+        {
+          // Keep the higher-valued or still-fresh remembered partner when glare hides it briefly.
+          const SlotWinner partner = slot_mem_[partner_idx].winner;
+          remember_slot(target_idx, cur);
+          chosen = pick_better(cur, partner);
+          confirmed_slots = 2;
+        } else {
+          remember_slot(target_idx, cur);
+        }
+      }
     } else {
       return TurnPlan{};
     }
+
+    if (confirmed_slots == 1 && cfg_.pair_hold_sec > 0.0) {
+      bool has_higher_pending = false;
+      if (cfg_.enforce_global_max_veto) {
+        const double veto_conf = std::max(cfg_.conf_threshold, cfg_.max_veto_min_conf);
+        for (const auto & obs : all_obs) {
+          if (obs.c.conf >= veto_conf &&
+              obs.c.digit > chosen.digit &&
+              std::abs(obs.c.x_norm - chosen.mean_x) >= cfg_.pair_x_sep_min)
+          {
+            has_higher_pending = true;
+            break;
+          }
+        }
+      }
+
+      if (!solo_hold_active_) {
+        solo_hold_active_ = true;
+        solo_hold_start_sec_ = now_sec;
+      }
+      const double hold_elapsed = std::max(0.0, now_sec - solo_hold_start_sec_);
+      if (hold_elapsed < cfg_.pair_hold_sec &&
+          (chosen.max_y < cfg_.pair_release_y || has_higher_pending))
+      {
+        return TurnPlan{};
+      }
+    }
+    solo_hold_active_ = false;
 
     const bool is_fork =
       has_yellow_ &&
@@ -284,6 +367,8 @@ public:
     last_seen_y_ = chosen.max_y;
     missing_frames_ = 0;
     window_.clear();
+    slot_mem_[0] = RememberedSlot{};
+    slot_mem_[1] = RememberedSlot{};
 
     return plan;
   }
@@ -333,8 +418,29 @@ public:
   }
 
 private:
+  struct SlotWinner
+  {
+    bool valid{false};
+    int digit{-1};
+    int votes{0};
+    double total_conf{0.0};
+    double mean_x{0.5};
+    double mean_y{0.5};
+    double max_y{0.0};
+  };
+
+  struct RememberedSlot
+  {
+    bool valid{false};
+    SlotWinner winner{};
+    double last_seen_sec{0.0};
+  };
+
   RobustDecisionConfig cfg_;
   std::deque<std::vector<DigitCandidate>> window_;
+  std::array<RememberedSlot, 2> slot_mem_{};
+  bool solo_hold_active_{false};
+  double solo_hold_start_sec_{0.0};
 
   bool has_yellow_{false};
   double last_yellow_time_sec_{0.0};

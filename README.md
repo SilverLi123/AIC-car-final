@@ -14,14 +14,17 @@
 ## 目录结构
 
 - `src/car_ws`：Wheeltec 底盘 ROS 2 工作区
-- `src/line_follow_ws`：C++ 巡线避障、YOLO 数字转向与 4 级速度多路复用工作区
+- `src/line_follow_ws`：C++ 巡线避障、YOLO 数字转向与 4 级速度多路复用工作区（**单套统一二进制同时支持 Ring 环岛图与 Fork 岔路图**，仅通过 YAML 参数切换）
   - `include/line_follower/red_lat_accel_limiter.hpp`：OPT4 高速避障侧向加速度 & 自适应转向变化率限幅器
-  - `config/parameter_presets/ring_opt4_20261127/`：11-26 晚优胜基线（`OPT3_S044` / `OPT3_S052`）及 11-27 实车 `OPT4` 6 组实验预设
+  - `include/line_follower/digit_decision_logic.hpp`：双目标配对延时保持、跨帧空间槽记忆（抗反光）与单帧高置信否决
+  - `include/line_follower/tjunction_merge_detector.hpp`：抗斜切与抗红障遮挡的 `┤` 丁字并线 + 防丢线救护状态机
+  - `config/parameter_presets/ring_opt4_20261127/`：环岛图 `OPT3` 优胜基线与 `OPT4` 实验预设
+  - `config/parameter_presets/fork_opt4_20261127/`：岔路图统一系统 `OPT4` 预设（`S030` / `S044` / `S052`）
 - `src/camera`、`src/yolov8`：相机与 BPU YOLOv8 数字检测节点
 - `src/scripts`：一键启动（`start_line_following.sh`）、OPT4 部署（`apply_opt4_to_v2.sh`）、车端同步（`sync_v2_from_car.sh`）、计时器（`lap_timer.py`）
 - `tests`：不依赖 ROS 运行时的纯 C++17 / Python 单元测试
 - `tools/rosbag_visualizer`：ROS 2 录包离线分析与视频面板渲染工具
-- `docs`：赛前实车记录、实验方案（含 [`docs/实车测试/20261127_高速防摆动OPT4实验方案.md`](docs/实车测试/20261127_高速防摆动OPT4实验方案.md)）与历史参数归档（`docs/archive/`）
+- `docs`：赛前实车记录、实验方案（含 [`docs/实车测试/20261127_高速防摆动OPT4实验方案.md`](docs/实车测试/20261127_高速防摆动OPT4实验方案.md) 与 [`docs/实车测试/20261127_Fork岔路与统一双图改造说明.md`](docs/实车测试/20261127_Fork岔路与统一双图改造说明.md)）与历史参数归档（`docs/archive/`）
 
 ## 快速开始
 

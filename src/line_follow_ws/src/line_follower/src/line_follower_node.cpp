@@ -161,6 +161,9 @@ LineFollowerNode::LineFollowerNode()
   red_left_votes_ = 0;
   red_right_votes_ = 0;
   red_turning_ = false;
+  odom_receive_time_ = this->now();
+  red_slew_last_time_ = this->now();
+  red_last_active_time_ = this->now();
   red_turn_end_time_ = this->now();
   last_red_overlay_valid_ = false;
 
@@ -191,12 +194,20 @@ LineFollowerNode::LineFollowerNode()
       red_carve_pad_x_far_, red_carve_pad_x_near_, red_carve_trigger_bottom_ratio_,
       red_carve_extend_down_ratio_, red_carve_hold_frames_, red_carve_hysteresis_ratio_);
   }
+
+  RCLCPP_INFO(
+    this->get_logger(),
+    "Unified features: avoid_topic='%s', det_cmd='%s', lat_accel=%.2f, tjunction_merge=%s",
+    avoid_cmd_topic_.c_str(), detection_cmd_topic_.c_str(), red_avoid_max_lat_accel_,
+    tjunction_controller_.config().enabled ? "on" : "off");
 }
 
 void LineFollowerNode::declare_parameters()
 {
   this->declare_parameter("image_topic", "/ascamera/camera_publisher/rgb/image0");
   this->declare_parameter("cmd_vel_topic", "/cmd_vel");
+  this->declare_parameter("avoid_cmd_topic", "/cmd_vel_avoid");
+  this->declare_parameter("detection_cmd_topic", "/cmd_vel_detection");
   this->declare_parameter("debug_image_topic", "line_follower/debug_image");
   this->declare_parameter("line_state_topic", "line_follower/track_state");
   this->declare_parameter("start_topic", "line_follower/start_cmd");
@@ -316,6 +327,36 @@ void LineFollowerNode::declare_parameters()
   // 白道边界护栏：当车体已偏向避让侧（快压对侧黑线）时，平滑衰减红障斥力并恢复巡线回中力。
   this->declare_parameter("red_edge_guard_start_error", 0.15);
   this->declare_parameter("red_edge_guard_full_error", 0.30);
+  this->declare_parameter("red_edge_guard_min_repulsion", 0.0);
+  this->declare_parameter("red_avoid_max_yaw_rate", 9.9);
+  this->declare_parameter("red_avoid_max_lat_accel", 0.0);
+  this->declare_parameter("red_avoid_highspeed_slew_ref_speed", 0.0);
+  this->declare_parameter("red_avoid_yaw_slew_rate", 0.0);
+  this->declare_parameter("red_avoid_release_hold_sec", 0.35);
+
+  // Unified Fork T-junction merge parameters (default disabled so Ring is unaffected).
+  this->declare_parameter("enable_tjunction_merge", false);
+  this->declare_parameter("tjunction_require_branch_gate", true);
+  this->declare_parameter("tjunction_arm_yellow_count", 2);
+  this->declare_parameter("tjunction_branch_trigger_sign", -1);
+  this->declare_parameter("tjunction_merge_direction", -1);
+  this->declare_parameter("tjunction_min_arm_dist", 0.32);
+  this->declare_parameter("tjunction_min_arm_time", 1.0);
+  this->declare_parameter("tjunction_confirm_frames", 2);
+  this->declare_parameter("tjunction_max_upper_road_ratio", 0.26);
+  this->declare_parameter("tjunction_min_wide_row_ratio", 0.28);
+  this->declare_parameter("tjunction_min_row_span_ratio", 0.72);
+  this->declare_parameter("tjunction_left_edge_max_ratio", 0.22);
+  this->declare_parameter("tjunction_right_edge_min_ratio", 0.78);
+  this->declare_parameter("tjunction_min_top_dark_ratio", 0.70);
+  this->declare_parameter("tjunction_rescue_upper_road_ratio", 0.12);
+  this->declare_parameter("tjunction_rescue_total_road_ratio", 0.28);
+  this->declare_parameter("tjunction_merge_speed", 0.14);
+  this->declare_parameter("tjunction_merge_yaw_rate", 1.45);
+  this->declare_parameter("tjunction_min_turn_duration", 0.85);
+  this->declare_parameter("tjunction_max_turn_duration", 1.85);
+  this->declare_parameter("tjunction_exit_upper_road_ratio", 0.30);
+  this->declare_parameter("tjunction_exit_max_wide_row_ratio", 0.35);
 
   // 红色避障只允许减速，不允许停车。无论红线还是红锥，最低保持该前进速度。
   this->declare_parameter("red_min_forward_speed", 0.06);
@@ -366,6 +407,8 @@ void LineFollowerNode::declare_parameters()
 
   image_topic_ = this->get_parameter("image_topic").as_string();
   cmd_vel_topic_ = this->get_parameter("cmd_vel_topic").as_string();
+  avoid_cmd_topic_ = this->get_parameter("avoid_cmd_topic").as_string();
+  detection_cmd_topic_ = this->get_parameter("detection_cmd_topic").as_string();
   debug_image_topic_ = this->get_parameter("debug_image_topic").as_string();
   line_state_topic_ = this->get_parameter("line_state_topic").as_string();
   start_topic_ = this->get_parameter("start_topic").as_string();
@@ -550,6 +593,65 @@ void LineFollowerNode::declare_parameters()
   red_edge_guard_full_error_ = clamp(
     this->get_parameter("red_edge_guard_full_error").as_double(),
     red_edge_guard_start_error_ + 0.02, 1.0);
+  red_edge_guard_min_repulsion_ = clamp(
+    this->get_parameter("red_edge_guard_min_repulsion").as_double(), 0.0, 1.0);
+  red_avoid_max_yaw_rate_ = std::max(
+    0.2, this->get_parameter("red_avoid_max_yaw_rate").as_double());
+  red_avoid_max_lat_accel_ = std::max(
+    0.0, this->get_parameter("red_avoid_max_lat_accel").as_double());
+  red_avoid_highspeed_slew_ref_speed_ = std::max(
+    0.0, this->get_parameter("red_avoid_highspeed_slew_ref_speed").as_double());
+  red_avoid_yaw_slew_rate_ = std::max(
+    0.0, this->get_parameter("red_avoid_yaw_slew_rate").as_double());
+  red_avoid_release_hold_sec_ = std::max(
+    0.0, this->get_parameter("red_avoid_release_hold_sec").as_double());
+
+  line_follower::tjunction::TjunctionConfig tj_cfg;
+  tj_cfg.enabled = this->get_parameter("enable_tjunction_merge").as_bool();
+  tj_cfg.require_branch_gate =
+    this->get_parameter("tjunction_require_branch_gate").as_bool();
+  tj_cfg.arm_yellow_count = std::max<int>(
+    1, static_cast<int>(this->get_parameter("tjunction_arm_yellow_count").as_int()));
+  tj_cfg.branch_trigger_sign = static_cast<int>(
+    this->get_parameter("tjunction_branch_trigger_sign").as_int());
+  tj_cfg.merge_direction = static_cast<int>(
+    this->get_parameter("tjunction_merge_direction").as_int());
+  tj_cfg.min_arm_dist_m = std::max(
+    0.0, this->get_parameter("tjunction_min_arm_dist").as_double());
+  tj_cfg.min_arm_time_sec = std::max(
+    0.0, this->get_parameter("tjunction_min_arm_time").as_double());
+  tj_cfg.confirm_frames = std::max<int>(
+    1, static_cast<int>(this->get_parameter("tjunction_confirm_frames").as_int()));
+  tj_cfg.max_upper_road_ratio = clamp(
+    this->get_parameter("tjunction_max_upper_road_ratio").as_double(), 0.02, 0.80);
+  tj_cfg.min_wide_row_ratio = clamp(
+    this->get_parameter("tjunction_min_wide_row_ratio").as_double(), 0.05, 0.90);
+  tj_cfg.min_row_span_ratio = clamp(
+    this->get_parameter("tjunction_min_row_span_ratio").as_double(), 0.30, 0.98);
+  tj_cfg.left_edge_max_ratio = clamp(
+    this->get_parameter("tjunction_left_edge_max_ratio").as_double(), 0.05, 0.45);
+  tj_cfg.right_edge_min_ratio = clamp(
+    this->get_parameter("tjunction_right_edge_min_ratio").as_double(), 0.55, 0.95);
+  tj_cfg.min_top_dark_ratio = clamp(
+    this->get_parameter("tjunction_min_top_dark_ratio").as_double(), 0.20, 0.98);
+  tj_cfg.rescue_upper_road_ratio = clamp(
+    this->get_parameter("tjunction_rescue_upper_road_ratio").as_double(), 0.01, 0.50);
+  tj_cfg.rescue_total_road_ratio = clamp(
+    this->get_parameter("tjunction_rescue_total_road_ratio").as_double(), 0.02, 0.80);
+  tj_cfg.merge_speed = std::max(
+    0.05, this->get_parameter("tjunction_merge_speed").as_double());
+  tj_cfg.merge_yaw_rate = std::abs(
+    this->get_parameter("tjunction_merge_yaw_rate").as_double());
+  tj_cfg.min_turn_duration_sec = std::max(
+    0.10, this->get_parameter("tjunction_min_turn_duration").as_double());
+  tj_cfg.max_turn_duration_sec = std::max(
+    tj_cfg.min_turn_duration_sec,
+    this->get_parameter("tjunction_max_turn_duration").as_double());
+  tj_cfg.exit_upper_road_ratio = clamp(
+    this->get_parameter("tjunction_exit_upper_road_ratio").as_double(), 0.05, 0.80);
+  tj_cfg.exit_max_wide_row_ratio = clamp(
+    this->get_parameter("tjunction_exit_max_wide_row_ratio").as_double(), 0.05, 0.90);
+  tjunction_controller_.set_config(tj_cfg);
   red_min_forward_speed_ = std::max(
     0.01, this->get_parameter("red_min_forward_speed").as_double());
   red_line_fallback_direction_ = static_cast<int>(
@@ -615,6 +717,9 @@ void LineFollowerNode::declare_parameters()
 void LineFollowerNode::setup_interfaces()
 {
   cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
+  if (!avoid_cmd_topic_.empty() && avoid_cmd_topic_ != cmd_vel_topic_) {
+    avoid_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(avoid_cmd_topic_, 10);
+  }
   stop_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(stop_cmd_topic_, 10);
   state_pub_ = this->create_publisher<std_msgs::msg::String>(line_state_topic_, 10);
   centroid_pub_ = this->create_publisher<geometry_msgs::msg::Point>(line_centroid_topic_, 10);
@@ -628,10 +733,14 @@ void LineFollowerNode::setup_interfaces()
   start_sub_ = this->create_subscription<std_msgs::msg::Bool>(
     start_topic_, 10, std::bind(&LineFollowerNode::start_callback, this, std::placeholders::_1));
 
-  if (reverse_brake_enabled_ || enable_yellow_odom_stop_confirm_) {
-    odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
-      odom_topic_, rclcpp::QoS(10),
-      std::bind(&LineFollowerNode::odom_callback, this, std::placeholders::_1));
+  odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+    odom_topic_, rclcpp::QoS(10),
+    std::bind(&LineFollowerNode::odom_callback, this, std::placeholders::_1));
+
+  if (tjunction_controller_.config().enabled && !detection_cmd_topic_.empty()) {
+    det_cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
+      detection_cmd_topic_, rclcpp::QoS(10),
+      std::bind(&LineFollowerNode::detection_cmd_callback, this, std::placeholders::_1));
   }
 
   if (reverse_brake_enabled_) {
@@ -716,6 +825,9 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     last_state_ = TrackState::LOST;
     steering_pd_.reset();
     g_red_carve.reset();
+    tjunction_controller_.reset_lap();
+    red_slew_initialized_ = false;
+    red_last_active_valid_ = false;
 
     RCLCPP_INFO(
       this->get_logger(),
@@ -731,6 +843,9 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     yellow_still_started_ = false;
     steering_pd_.reset();
     g_red_carve.reset();
+    tjunction_controller_.on_pause();
+    red_slew_initialized_ = false;
+    red_last_active_valid_ = false;
     if (reverse_brake_active_) {
       reverse_brake_active_ = false;
       publish_cmd_vel(0.0, 0.0, true);
@@ -746,10 +861,44 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
 
 void LineFollowerNode::odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg)
 {
+  if (!msg) {
+    return;
+  }
+  const double x = msg->pose.pose.position.x;
+  const double y = msg->pose.pose.position.y;
+  if (odom_pose_initialized_) {
+    const double step = std::hypot(x - last_odom_x_, y - last_odom_y_);
+    if (std::isfinite(step) && step < 0.5) {
+      odom_total_dist_m_ += step;
+    }
+  } else {
+    odom_pose_initialized_ = true;
+  }
+  last_odom_x_ = x;
+  last_odom_y_ = y;
   odom_linear_speed_ = msg->twist.twist.linear.x;
   odom_angular_speed_ = msg->twist.twist.angular.z;
   odom_receive_time_ = this->now();
   odom_received_ = true;
+}
+
+void LineFollowerNode::detection_cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
+{
+  if (!msg || !start_enabled_) {
+    return;
+  }
+  const bool prev_armed = tjunction_controller_.is_armed();
+  tjunction_controller_.on_detection_turn(
+    yellow_line_detection_count_,
+    msg->angular.z,
+    odom_total_dist_m_,
+    this->now().seconds());
+  if (!prev_armed && tjunction_controller_.is_armed()) {
+    RCLCPP_INFO(
+      this->get_logger(),
+      "[T-merge] Inner branch armed (yellow=%d, det_w=%+.2f, dist=%.2fm).",
+      yellow_line_detection_count_, msg->angular.z, odom_total_dist_m_);
+  }
 }
 
 void LineFollowerNode::digit_detection_callback(
@@ -900,6 +1049,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   double yaw_rate = 0.0;
   TrackState current_state = TrackState::LOST;
   bool publish_stop_cmd = false;
+  bool publish_avoid_cmd = false;
 
   // ============================================================
   // 红色避障检测与投票
@@ -1360,6 +1510,86 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
   const bool yellow_stop_now =
     permanent_stop_ || temp_yellow_stop_active;
 
+  line_follower::tjunction::TjunctionDecision tj_dec;
+  if (!yellow_stop_now && tjunction_controller_.config().enabled && result_opt &&
+      !result_opt->binary_mask.empty())
+  {
+    cv::Mat combined = result_opt->binary_mask.clone();
+    if (enable_red_filter_ && !result_opt->roi_bgr.empty()) {
+      cv::Mat hsv_tj;
+      if (!result_opt->roi_hsv.empty()) {
+        hsv_tj = result_opt->roi_hsv;
+      } else {
+        cv::cvtColor(result_opt->roi_bgr, hsv_tj, cv::COLOR_BGR2HSV);
+      }
+      cv::Mat r1, r2, rmask, r_dil;
+      cv::inRange(
+        hsv_tj,
+        cv::Scalar(static_cast<double>(red_h_low_1_), static_cast<double>(red_s_min_), static_cast<double>(red_v_min_)),
+        cv::Scalar(static_cast<double>(red_h_high_1_), 255.0, 255.0),
+        r1);
+      cv::inRange(
+        hsv_tj,
+        cv::Scalar(static_cast<double>(red_h_low_2_), static_cast<double>(red_s_min_), static_cast<double>(red_v_min_)),
+        cv::Scalar(static_cast<double>(red_h_high_2_), 255.0, 255.0),
+        r2);
+      cv::bitwise_or(r1, r2, rmask);
+      const cv::Mat k5 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+      cv::dilate(rmask, r_dil, k5);
+      cv::bitwise_or(combined, r_dil, combined);
+    }
+
+    // Keep only components touching bottom 10 rows to ignore background reflections above the crossbar.
+    cv::Mat labels;
+    const int nlbl = cv::connectedComponents(combined, labels, 8, CV_32S);
+    std::vector<unsigned char> keep_lbl(static_cast<size_t>(std::max(1, nlbl)), 0);
+    const int seed_y0 = std::max(0, combined.rows - 10);
+    for (int y = seed_y0; y < combined.rows; ++y) {
+      const int * lptr = labels.ptr<int>(y);
+      for (int x = 0; x < combined.cols; ++x) {
+        const int l = lptr[x];
+        if (l > 0 && l < nlbl) {
+          keep_lbl[static_cast<size_t>(l)] = 1;
+        }
+      }
+    }
+    cv::Mat bot_mask = cv::Mat::zeros(combined.rows, combined.cols, CV_8UC1);
+    for (int y = 0; y < combined.rows; ++y) {
+      const int * lptr = labels.ptr<int>(y);
+      unsigned char * bptr = bot_mask.ptr<unsigned char>(y);
+      for (int x = 0; x < combined.cols; ++x) {
+        const int l = lptr[x];
+        if (l > 0 && l < nlbl && keep_lbl[static_cast<size_t>(l)]) {
+          bptr[x] = 255;
+        }
+      }
+    }
+
+    const auto tj_m = line_follower::tjunction::analyze_mask(
+      bot_mask.data, bot_mask.rows, bot_mask.cols,
+      static_cast<int>(bot_mask.step), tjunction_controller_.config());
+    tj_dec = tjunction_controller_.update(
+      tj_m, result_opt->line_detected, odom_total_dist_m_, odom_received_, now.seconds());
+
+    if (tj_dec.just_triggered) {
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[T-merge] Triggered (%s): upper=%.2f, wide=%.2f, top_dark=%.2f, total=%.2f -> v=%.2f w=%+.2f",
+        tj_dec.rescue_triggered ? "anti-LOST rescue" : "wall",
+        tj_m.upper_center_road_ratio, tj_m.lower_wide_row_ratio,
+        tj_m.top_wall_dark_ratio, tj_m.total_road_ratio,
+        tj_dec.linear_x, tj_dec.angular_z);
+    }
+    if (tj_dec.just_completed) {
+      steering_pd_.reset();
+      g_red_avoid.reset_lock();
+      RCLCPP_INFO(
+        this->get_logger(),
+        "[T-merge] Completed (upper=%.2f, wide=%.2f). Returning to closed-loop PD.",
+        tj_m.upper_center_road_ratio, tj_m.lower_wide_row_ratio);
+    }
+  }
+
   if (!yellow_stop_now && intersection_active_) {
     if (now <= intersection_end_time_) {
       linear_speed = intersection_turn_speed_;
@@ -1370,8 +1600,25 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     }
   }
 
-  if (!yellow_stop_now && soft_red_enabled) {
-    if (soft_red_active) {
+  line_follower::RedLatAccelConfig red_lat_cfg;
+  red_lat_cfg.max_yaw_rate = max_yaw_rate_;
+  red_lat_cfg.red_avoid_max_yaw_rate = red_avoid_max_yaw_rate_;
+  red_lat_cfg.max_lat_accel = red_avoid_max_lat_accel_;
+  red_lat_cfg.highspeed_slew_ref_speed = red_avoid_highspeed_slew_ref_speed_;
+  const double red_odom_age =
+    odom_received_ ? (now - odom_receive_time_).seconds() : 1e9;
+  const bool red_odom_fresh =
+    odom_received_ && red_odom_age >= 0.0 && red_odom_age <= 0.25;
+  const double red_v_eff = line_follower::compute_effective_speed(
+    linear_speed, odom_linear_speed_, red_odom_fresh);
+
+  const bool blocked_by_tmerge =
+    tj_dec.suppress_all_red ||
+    (tj_dec.suppress_opposite_red &&
+     (soft_red_yaw_bias * static_cast<double>(tjunction_controller_.config().merge_direction) < 0.0));
+
+  if (!yellow_stop_now && !tj_dec.active && soft_red_enabled) {
+    if (soft_red_active && !blocked_by_tmerge) {
       // ==========================================================
       // 动态红锥避障融合
       //
@@ -1451,7 +1698,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         (edge_err - edge_guard_start) / (edge_guard_full - edge_guard_start),
         0.0, 1.0);
 
-      repulsion_strength *= (1.0 - edge_guard);
+      const double min_keep =
+        (bottom_ratio >= red_very_close_ratio) ? red_edge_guard_min_repulsion_ : 0.0;
+      repulsion_strength *= std::max(min_keep, 1.0 - edge_guard);
       const double effective_lane_keep_factor =
         lane_keep_factor + (1.0 - lane_keep_factor) * edge_guard;
 
@@ -1475,11 +1724,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         }
       }
 
-      yaw_rate =
-        clamp(
-          yaw_rate,
-          -max_yaw_rate_,
-          max_yaw_rate_);
+      const double red_max_yaw =
+        line_follower::compute_red_avoid_yaw_cap(red_lat_cfg, red_v_eff);
+      yaw_rate = clamp(yaw_rate, -red_max_yaw, red_max_yaw);
 
       // 越近越慢：
       // risk=0 -> red_soft_speed
@@ -1505,15 +1752,50 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         bottom_ratio >= red_very_close_ratio;
 
       current_state = TrackState::TRACKING;
+      publish_avoid_cmd = true;
+      red_last_active_valid_ = true;
+      red_last_active_time_ = now;
     }
-  } else if (!yellow_stop_now && red_turning_ && now < red_turn_end_time_) {
-    // 旧红锥控制：仅在 enable_soft_red_avoidance=false 时生效。
+  } else if (!yellow_stop_now && !tj_dec.active && red_turning_ && now < red_turn_end_time_) {
     linear_speed = std::max(red_min_forward_speed, red_turn_linear_);
     yaw_rate = red_turn_yaw_cmd_;
     current_state = TrackState::TRACKING;
+    publish_avoid_cmd = true;
   } else if (red_turning_ && now >= red_turn_end_time_) {
     red_turning_ = false;
   }
+
+  if (!yellow_stop_now && tj_dec.active) {
+    linear_speed = tj_dec.linear_x;
+    yaw_rate = clamp(tj_dec.angular_z, -max_yaw_rate_, max_yaw_rate_);
+    current_state = TrackState::TRACKING;
+    publish_avoid_cmd = true;
+  }
+
+  if (red_avoid_yaw_slew_rate_ > 0.0 && !yellow_stop_now && !tj_dec.active &&
+      current_state == TrackState::TRACKING && result_opt && result_opt->line_detected)
+  {
+    const bool in_red_window =
+      (soft_red_active && !blocked_by_tmerge) ||
+      (red_last_active_valid_ &&
+       (now - red_last_active_time_).seconds() <= red_avoid_release_hold_sec_);
+    if (in_red_window && red_slew_initialized_) {
+      const double dt = clamp((now - red_slew_last_time_).seconds(), 0.005, 0.10);
+      const double eff_slew = line_follower::compute_red_avoid_slew_rate(
+        red_avoid_yaw_slew_rate_, red_lat_cfg, red_v_eff);
+      const double max_delta = eff_slew * dt;
+      yaw_rate = clamp(
+        yaw_rate,
+        red_slew_last_yaw_ - max_delta,
+        red_slew_last_yaw_ + max_delta);
+    }
+    red_slew_last_yaw_ = yaw_rate;
+    red_slew_last_time_ = now;
+    red_slew_initialized_ = true;
+  } else {
+    red_slew_initialized_ = false;
+  }
+
 
   // 自由空间雕刻模式下，红色障碍越近仅平滑减速（路线已在 process_image 中沿空道规划）。
   if (!yellow_stop_now && enable_red_freespace_carving_ &&
@@ -1540,6 +1822,9 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     linear_speed = 0.0;
     yaw_rate = 0.0;
     publish_stop_cmd = true;
+    publish_avoid_cmd = false;
+    red_slew_initialized_ = false;
+    red_last_active_valid_ = false;
   }
 
   // 只有黄色停车锁可以把运行中的车速压到 0。
@@ -1583,7 +1868,7 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
 
   // 反向脉冲期间由 20 ms 定时器独占输出；图像回调不得用普通停车零速覆盖它。
   if (!reverse_brake_active_) {
-    publish_cmd_vel(linear_speed, yaw_rate, publish_stop_cmd);
+    publish_cmd_vel(linear_speed, yaw_rate, publish_stop_cmd, publish_avoid_cmd);
   }
 
   if (current_state != last_state_ ||
@@ -2819,7 +3104,9 @@ std::string LineFollowerNode::state_to_string(TrackState state) const
   }
 }
 
-void LineFollowerNode::publish_cmd_vel(double linear_speed, double yaw_rate, bool publish_stop){
+void LineFollowerNode::publish_cmd_vel(
+  double linear_speed, double yaw_rate, bool publish_stop, bool publish_avoid)
+{
   geometry_msgs::msg::Twist cmd;
   cmd.linear.x = linear_speed;
   cmd.angular.z = yaw_rate;
@@ -2827,9 +3114,10 @@ void LineFollowerNode::publish_cmd_vel(double linear_speed, double yaw_rate, boo
 
   // Yellow stop topic has highest mux priority. Reverse braking also uses it so
   // the temporary pulse cannot be overwritten by the normal follower command.
-  if (stop_pub_ && publish_stop)
-  {
+  if (stop_pub_ && publish_stop) {
     stop_pub_->publish(cmd);
+  } else if (avoid_pub_ && publish_avoid) {
+    avoid_pub_->publish(cmd);
   }
 }
 

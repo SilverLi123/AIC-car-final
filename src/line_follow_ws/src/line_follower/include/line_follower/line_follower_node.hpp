@@ -18,7 +18,9 @@
 #include <std_msgs/msg/string.hpp>
 
 #include "line_follower/red_freespace_carver.hpp"
+#include "line_follower/red_lat_accel_limiter.hpp"
 #include "line_follower/steering_pd_controller.hpp"
+#include "line_follower/tjunction_merge_detector.hpp"
 
 namespace line_follower
 {
@@ -65,6 +67,7 @@ private:
 
   void start_callback(const std_msgs::msg::Bool::SharedPtr msg);
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void detection_cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg);
   void digit_detection_callback(const ai_msgs::msg::PerceptionTargets::SharedPtr msg);
   void reverse_brake_timer_callback();
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
@@ -90,7 +93,8 @@ private:
   void publish_cmd_vel(
     double linear_speed,
     double yaw_rate,
-    bool publish_stop);
+    bool publish_stop,
+    bool publish_avoid = false);
 
   void publish_state(TrackState state);
   void publish_centroid(double norm_x, double norm_y);
@@ -107,6 +111,8 @@ private:
   // ============================================================
   std::string image_topic_;
   std::string cmd_vel_topic_;
+  std::string avoid_cmd_topic_{"/cmd_vel_avoid"};
+  std::string detection_cmd_topic_{"/cmd_vel_detection"};
   std::string debug_image_topic_;
   std::string line_state_topic_;
   std::string start_topic_;
@@ -175,6 +181,10 @@ private:
   bool odom_received_{false};
   double odom_linear_speed_{0.0};
   double odom_angular_speed_{0.0};
+  double odom_total_dist_m_{0.0};
+  bool odom_pose_initialized_{false};
+  double last_odom_x_{0.0};
+  double last_odom_y_{0.0};
   rclcpp::Time odom_receive_time_;
   rclcpp::Time reverse_brake_start_time_;
 
@@ -253,6 +263,17 @@ private:
   double red_lane_keep_min_factor_{0.40};
   double red_edge_guard_start_error_{0.15};
   double red_edge_guard_full_error_{0.30};
+  double red_edge_guard_min_repulsion_{0.0};
+  double red_avoid_max_yaw_rate_{9.9};
+  double red_avoid_max_lat_accel_{0.0};
+  double red_avoid_highspeed_slew_ref_speed_{0.0};
+  double red_avoid_yaw_slew_rate_{0.0};
+  double red_avoid_release_hold_sec_{0.35};
+  bool red_slew_initialized_{false};
+  double red_slew_last_yaw_{0.0};
+  rclcpp::Time red_slew_last_time_;
+  bool red_last_active_valid_{false};
+  rclcpp::Time red_last_active_time_;
   double red_min_forward_speed_{0.06};
   int red_line_fallback_direction_{-1};
   double red_line_soft_yaw_{0.35};
@@ -314,6 +335,8 @@ private:
   double curve_preview_last_yaw_rate_{0.0};
   rclcpp::Time curve_preview_last_time_;
 
+  line_follower::tjunction::TjunctionMergeController tjunction_controller_;
+
   bool start_enabled_{false};
   TrackState last_state_{TrackState::LOST};
   rclcpp::Time last_detection_time_;
@@ -335,6 +358,7 @@ private:
   // ROS interfaces
   // ============================================================
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr avoid_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr stop_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr centroid_pub_;
@@ -342,6 +366,7 @@ private:
   image_transport::Subscriber image_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr det_cmd_sub_;
   rclcpp::Subscription<ai_msgs::msg::PerceptionTargets>::SharedPtr digit_det_sub_;
   rclcpp::TimerBase::SharedPtr reverse_brake_timer_;
 

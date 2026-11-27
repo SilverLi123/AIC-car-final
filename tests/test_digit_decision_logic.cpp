@@ -149,6 +149,126 @@ void test_duplicate_boxes_in_single_frame_cannot_trigger()
   std::cout << "[PASS] test_duplicate_boxes_in_single_frame_cannot_trigger\n";
 }
 
+void test_fork_pair_hold_waits_for_delayed_larger_digit()
+{
+  RobustDecisionConfig cfg;
+  cfg.min_votes = 2;
+  cfg.vote_window_frames = 4;
+  cfg.pair_hold_sec = 0.45;
+  cfg.pair_release_y = 0.68;
+  cfg.slot_memory_sec = 0.80;
+  cfg.enforce_global_max_veto = true;
+
+  RobustDigitDecision dec(cfg);
+  dec.on_yellow_line(10.0);
+
+  // Digit 6 confirms first while below release_y; partner 8 arrives 0.15s later.
+  assert(!dec.process_frame({{6, 0.90, 0.25, 0.50}}, 0.50, 10.50).trigger);
+  TurnPlan p6 = dec.process_frame({{6, 0.91, 0.25, 0.53}}, 0.50, 10.55);
+  assert(!p6.trigger);  // Held instead of firing prematurely on 6!
+
+  // Now digit 8 appears on right side over 2 frames at 0.60 / 0.65 -> triggers on 8.
+  assert(!dec.process_frame({{6, 0.89, 0.24, 0.56}, {8, 0.85, 0.72, 0.54}}, 0.50, 10.60).trigger);
+  TurnPlan p8 = dec.process_frame({{6, 0.88, 0.24, 0.59}, {8, 0.88, 0.73, 0.57}}, 0.50, 10.65);
+  assert(p8.trigger);
+  assert(p8.chosen_digit == 8);
+  assert(p8.angular_z < 0.0);  // 0.73 is right of 0.50 -> turn right
+  std::cout << "[PASS] test_fork_pair_hold_waits_for_delayed_larger_digit\n";
+}
+
+void test_slot_memory_survives_glare_dropout_on_larger_digit()
+{
+  RobustDecisionConfig cfg;
+  cfg.min_votes = 2;
+  cfg.vote_window_frames = 3;
+  cfg.pair_hold_sec = 0.35;
+  cfg.pair_release_y = 0.68;
+  cfg.slot_memory_sec = 0.80;
+
+  RobustDigitDecision dec(cfg);
+  dec.on_yellow_line(20.0);
+
+  // Frame 1-2: Digit 8 confirms on right side at y=0.45..0.48 while 6 isn't strong yet.
+  assert(!dec.process_frame({{8, 0.92, 0.74, 0.45}}, 0.50, 20.50).trigger);
+  assert(!dec.process_frame({{8, 0.93, 0.74, 0.48}}, 0.50, 20.55).trigger);  // 8 remembered in slot_mem!
+
+  // Glare knocks out 8 for 4 frames while 6 appears and confirms.
+  // Because slot memory still retains 8 from t=20.55 (< 0.80s), 8 must still win!
+  assert(!dec.process_frame({{6, 0.88, 0.24, 0.56}}, 0.50, 20.60).trigger);
+  TurnPlan p = dec.process_frame({{6, 0.90, 0.24, 0.60}}, 0.50, 20.65);
+  assert(p.trigger);
+  assert(p.chosen_digit == 8);
+  std::cout << "[PASS] test_slot_memory_survives_glare_dropout_on_larger_digit\n";
+}
+
+void test_global_max_veto_holds_for_single_frame_high_conf_larger_digit()
+{
+  RobustDecisionConfig cfg;
+  cfg.min_votes = 2;
+  cfg.vote_window_frames = 3;
+  cfg.pair_hold_sec = 0.45;
+  cfg.pair_release_y = 0.68;
+  cfg.slot_memory_sec = 0.80;
+  cfg.enforce_global_max_veto = true;
+  cfg.max_veto_min_conf = 0.60;
+
+  RobustDigitDecision dec(cfg);
+  dec.on_yellow_line(30.0);
+
+  // Even when 6 has reached y=0.70 >= pair_release_y, a 1-frame high-conf 8 holds firing.
+  assert(!dec.process_frame({{6, 0.91, 0.25, 0.66}}, 0.50, 30.50).trigger);
+  TurnPlan p_hold = dec.process_frame(
+    {{6, 0.92, 0.24, 0.70}, {8, 0.78, 0.74, 0.60}}, 0.50, 30.55);
+  assert(!p_hold.trigger);
+
+  // Frame 3 confirms 8 -> wins over 6.
+  TurnPlan p_win = dec.process_frame(
+    {{6, 0.93, 0.24, 0.74}, {8, 0.82, 0.75, 0.64}}, 0.50, 30.60);
+  assert(p_win.trigger);
+  assert(p_win.chosen_digit == 8);
+  std::cout << "[PASS] test_global_max_veto_holds_for_single_frame_high_conf_larger_digit\n";
+}
+
+void test_genuine_solo_digit_releases_at_pair_release_y()
+{
+  RobustDecisionConfig cfg;
+  cfg.min_votes = 2;
+  cfg.pair_hold_sec = 0.45;
+  cfg.pair_release_y = 0.68;
+  cfg.slot_memory_sec = 0.80;
+  cfg.enforce_global_max_veto = true;
+
+  RobustDigitDecision dec(cfg);
+  // Straight section solo digit: held while far (y<0.68), releases immediately at y=0.69.
+  assert(!dec.process_frame({{5, 0.92, 0.72, 0.50}}, 0.50, 40.00).trigger);
+  assert(!dec.process_frame({{5, 0.92, 0.72, 0.55}}, 0.50, 40.05).trigger);
+  TurnPlan p = dec.process_frame({{5, 0.93, 0.72, 0.69}}, 0.50, 40.10);
+  assert(p.trigger);
+  assert(p.chosen_digit == 5);
+  std::cout << "[PASS] test_genuine_solo_digit_releases_at_pair_release_y\n";
+}
+
+void test_yellow_line_clears_slot_memory_and_hold()
+{
+  RobustDecisionConfig cfg;
+  cfg.min_votes = 2;
+  cfg.pair_hold_sec = 0.45;
+  cfg.pair_release_y = 0.68;
+  cfg.slot_memory_sec = 0.80;
+
+  RobustDigitDecision dec(cfg);
+  assert(!dec.process_frame({{8, 0.95, 0.75, 0.50}}, 0.50, 50.00).trigger);
+  assert(!dec.process_frame({{8, 0.95, 0.75, 0.54}}, 0.50, 50.05).trigger);
+
+  // Cross yellow line: stale 8 from before yellow line must not leak to after.
+  dec.on_yellow_line(50.10);
+  assert(!dec.process_frame({{5, 0.90, 0.25, 0.65}}, 0.50, 50.20).trigger);
+  TurnPlan p = dec.process_frame({{5, 0.92, 0.25, 0.70}}, 0.50, 50.25);
+  assert(p.trigger);
+  assert(p.chosen_digit == 5);
+  std::cout << "[PASS] test_yellow_line_clears_slot_memory_and_hold\n";
+}
+
 }  // namespace
 
 int main()
@@ -160,6 +280,11 @@ int main()
   test_closed_loop_early_finish();
   test_no_digits_never_triggers();
   test_duplicate_boxes_in_single_frame_cannot_trigger();
-  std::cout << "ALL 7 DIGIT DECISION TESTS PASSED\n";
+  test_fork_pair_hold_waits_for_delayed_larger_digit();
+  test_slot_memory_survives_glare_dropout_on_larger_digit();
+  test_global_max_veto_holds_for_single_frame_high_conf_larger_digit();
+  test_genuine_solo_digit_releases_at_pair_release_y();
+  test_yellow_line_clears_slot_memory_and_hold();
+  std::cout << "ALL 12 DIGIT DECISION TESTS PASSED\n";
   return 0;
 }

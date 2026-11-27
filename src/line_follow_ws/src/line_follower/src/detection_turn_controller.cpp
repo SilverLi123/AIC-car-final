@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include "line_follower/digit_decision_logic.hpp"
@@ -30,6 +31,7 @@ constexpr double kDefaultTurnDirectionSign = -1.0;  // 正值时 digit 在右转
 constexpr double kDefaultCentroidTimeout = 0.5;
 constexpr const char * kDefaultLineCentroidTopic = "line_follower/centroid";
 constexpr const char * kDefaultStateTopic = "line_follower/track_state";
+constexpr const char * kDefaultStartTopic = "line_follower/start_cmd";
 }  // namespace
 
 class DetectionTurnController : public rclcpp::Node
@@ -40,7 +42,9 @@ public:
   {
     detection_topic_ = this->declare_parameter<std::string>("detection_topic", "hobot_dnn_detection");
     state_topic_ = this->declare_parameter<std::string>("state_topic", kDefaultStateTopic);
+    start_topic_ = this->declare_parameter<std::string>("start_topic", kDefaultStartTopic);
     cmd_vel_topic_ = this->declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel_detection");
+    require_start_signal_ = this->declare_parameter<bool>("require_start_signal", true);
 
     conf_threshold_ = this->declare_parameter<double>("confidence_threshold", kDefaultConfThreshold);
     det_frame_width_ = this->declare_parameter<int>("det_frame_width", kDefaultDetFrameWidth);
@@ -68,6 +72,12 @@ public:
     rcfg.min_votes = this->declare_parameter<int>("min_votes", 2);
     rcfg.pair_x_sep_min = this->declare_parameter<double>("pair_x_sep_min", 0.12);
     rcfg.post_yellow_window_sec = this->declare_parameter<double>("post_yellow_window_sec", 3.5);
+    rcfg.pair_hold_sec = this->declare_parameter<double>("pair_hold_sec", 0.0);
+    rcfg.pair_release_y = this->declare_parameter<double>("pair_release_y", 0.68);
+    rcfg.slot_memory_sec = this->declare_parameter<double>("slot_memory_sec", 0.0);
+    rcfg.enforce_global_max_veto =
+      this->declare_parameter<bool>("enforce_global_max_veto", false);
+    rcfg.max_veto_min_conf = this->declare_parameter<double>("max_veto_min_conf", 0.60);
     rcfg.turn_direction_sign = turn_direction_sign_;
     rcfg.yaw_gain = yaw_gain_;
     rcfg.fork_turn_linear = turn_linear_;
@@ -92,6 +102,10 @@ public:
     state_sub_ = this->create_subscription<std_msgs::msg::String>(
       state_topic_, rclcpp::QoS(10),
       std::bind(&DetectionTurnController::state_callback, this, std::placeholders::_1));
+
+    start_sub_ = this->create_subscription<std_msgs::msg::Bool>(
+      start_topic_, rclcpp::QoS(10),
+      std::bind(&DetectionTurnController::start_callback, this, std::placeholders::_1));
 
     cmd_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(cmd_vel_topic_, 10);
 
@@ -149,6 +163,26 @@ private:
     last_centroid_time_ = this->now();
   }
 
+  void start_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg) {
+      return;
+    }
+    start_received_ = true;
+    const bool new_state = msg->data;
+    if (!new_state && start_enabled_) {
+      session_active_ = false;
+      session_frames_ = 0;
+      best_digit_ = -1;
+      best_conf_ = 0.0;
+      best_x_diff_ = 0.0;
+      best_y_diff_ = 0.0;
+      turning_ = false;
+      robust_decision_.reset_all();
+    }
+    start_enabled_ = new_state;
+  }
+
   void state_callback(const std_msgs::msg::String::SharedPtr msg)
   {
     if (!msg) {
@@ -156,6 +190,7 @@ private:
     }
     const auto & s = msg->data;
     if (s == "yellow_line_detected") {
+      yellow_stopped_ = true;
       // 黄线触发：清空当前数字会话并解除冷却，便于黄线后立即开始新一次数字识别
       session_active_ = false;
       session_frames_ = 0;
@@ -166,12 +201,20 @@ private:
       turning_ = false;
       turn_cooldown_until_ = this->now();
       robust_decision_.on_yellow_line(this->now().seconds());
+    } else {
+      yellow_stopped_ = false;
     }
   }
 
   void detection_callback(const ai_msgs::msg::PerceptionTargets::SharedPtr msg)
   {
     if (!msg) {
+      return;
+    }
+    if ((require_start_signal_ && (!start_received_ || !start_enabled_)) ||
+        (!require_start_signal_ && start_received_ && !start_enabled_) ||
+        yellow_stopped_)
+    {
       return;
     }
     rclcpp::Time now = this->now();
@@ -230,6 +273,7 @@ private:
         turning_end_time_ = now + rclcpp::Duration::from_seconds(plan.duration_sec);
         turn_cooldown_until_ = turning_end_time_ + rclcpp::Duration::from_seconds(turn_cooldown_);
         turning_ = true;
+        cmd_pub_->publish(turning_cmd_);
 
         RCLCPP_INFO(
           get_logger(),
@@ -352,7 +396,7 @@ private:
     if (!turning_) {
       return;
     }
-    if (this->now() >= turning_end_time_) {
+    if ((start_received_ && !start_enabled_) || yellow_stopped_ || this->now() >= turning_end_time_) {
       turning_ = false;
       return;
     }
@@ -362,8 +406,10 @@ private:
   // Params
   std::string detection_topic_;
   std::string state_topic_;
+  std::string start_topic_;
   std::string cmd_vel_topic_;
   std::string line_centroid_topic_;
+  bool require_start_signal_{true};
   double conf_threshold_{kDefaultConfThreshold};
   int det_frame_width_{kDefaultDetFrameWidth};
   int det_frame_height_{kDefaultDetFrameHeight};
@@ -400,8 +446,12 @@ private:
   rclcpp::Subscription<ai_msgs::msg::PerceptionTargets>::SharedPtr detection_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Point>::SharedPtr centroid_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_sub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_pub_;
   rclcpp::TimerBase::SharedPtr publish_timer_;
+  bool start_received_{false};
+  bool start_enabled_{false};
+  bool yellow_stopped_{false};
 };
 
 int main(int argc, char * argv[])
