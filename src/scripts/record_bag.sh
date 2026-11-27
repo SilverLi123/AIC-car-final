@@ -4,7 +4,13 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TROS_SETUP="${TROS_SETUP:-/opt/tros/humble/setup.bash}"
-BAG_DIR="${BAG_DIR:-$ROOT/recorded_bags}"
+if [[ -z "${BAG_DIR:-}" ]]; then
+  if command -v mountpoint >/dev/null 2>&1 && mountpoint -q /mnt/aic_usb && [[ -w /mnt/aic_usb ]]; then
+    BAG_DIR="/mnt/aic_usb/aic_bags_$(date +%Y%m%d)"
+  else
+    BAG_DIR="$ROOT/recorded_bags"
+  fi
+fi
 
 TAG="run"
 MAP=""
@@ -29,7 +35,7 @@ usage() {
   --model <bin路径>      本次使用的 YOLO 模型（记录路径、大小与 MD5）
   --note <文本>          补充实验备注（例如 "S060_LATCAP 第2圈"）
   --out-name <目录名>    自定义输出目录名（默认 <map>_<tag>_YYYYMMDD_HHMMSS）
-  --bag-dir <目录>       录包保存根目录（默认 <repo>/recorded_bags）
+  --bag-dir <目录>       录包保存根目录（优先可写 U 盘 /mnt/aic_usb/aic_bags_YYYYMMDD，否则 <repo>/recorded_bags）
   --debug-image          同时录制 /line_follower/debug_image（体积显著增大，默认关闭）
   --wait-enter           启动后按回车再开始录包
   --min-free-mb <MB>     磁盘最低可用空间检查阈值（默认 1500 MB）

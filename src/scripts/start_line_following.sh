@@ -13,7 +13,13 @@ CONFIG_DIR="$LINE_WS/src/line_follower/config"
 TROS_SETUP="${TROS_SETUP:-/opt/tros/humble/setup.bash}"
 LOG_ROOT="${LOG_ROOT:-$HOME/rdkx5_logs}"
 PARAM_USAGE_FILE="${PARAM_USAGE_FILE:-$LOG_ROOT/parameter_usage.tsv}"
-BAG_DIR="${BAG_DIR:-$ROOT/recorded_bags}"
+if [[ -z "${BAG_DIR:-}" ]]; then
+  if command -v mountpoint >/dev/null 2>&1 && mountpoint -q /mnt/aic_usb && [[ -w /mnt/aic_usb ]]; then
+    BAG_DIR="/mnt/aic_usb/aic_bags_$(date +%Y%m%d)"
+  else
+    BAG_DIR="$ROOT/recorded_bags"
+  fi
+fi
 START_CMD_TOPIC="/line_follower/start_cmd"
 
 PARAMS=""
@@ -60,7 +66,7 @@ usage() {
   --record-tag <标签>      同步后台录包并指定 tag（例如 R3_S060 或 F3_S044）
   --no-record              不录包，跳过交互询问
   --debug-image            录包时附带 /line_follower/debug_image（体积较大）
-  --bag-dir <目录>         指定录包输出目录（默认 <repo>/recorded_bags）
+  --bag-dir <目录>         指定录包输出目录（优先可写 U 盘 /mnt/aic_usb/aic_bags_YYYYMMDD，否则 <repo>/recorded_bags）
   --note <文本>            为本次录包附加备注（写入 run_meta.json）
   --finish-heading <JSON>  启用独立终点对正实验（需要已验证地面标定）
   --skip-chassis           底盘已在其他终端运行时跳过底盘启动
