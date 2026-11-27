@@ -1,4 +1,4 @@
-# Fork-map EXP1 (single-variable A/B on EXP0: enable yellow reverse brake)
+# Fork-map v2 restored EXP1 (EXP0 + yellow reverse brake)
 line_follower_node:
   ros__parameters:
     image_topic: "/image_raw"
@@ -50,6 +50,7 @@ line_follower_node:
     reverse_abort_speed: 0.01
     reverse_odom_timeout: 0.20
 
+    base_far_weight: 0.12
     enable_intersection_probe: false
     enable_continuous_curve_assist: true
     reverse_curve_min_error: 0.12
@@ -85,7 +86,7 @@ line_follower_node:
     enable_soft_red_avoidance: true
     red_soft_yaw: 0.18
     red_repulsion_gain: 1.25
-    red_near_ratio: 0.40
+    red_near_ratio: 0.38
     red_very_close_ratio: 0.72
     red_corridor_half_width_ratio: 0.30
     red_soft_curve_yaw_limit: 0.18
@@ -97,7 +98,7 @@ line_follower_node:
     red_zone_min_width_ratio: 0.10
     red_zone_min_pixels: 120
     red_zone_near_ratio: 0.26
-    red_zone_soft_yaw: 0.24
+    red_zone_soft_yaw: 0.22
     red_latch_clear_frames: 5
     red_soft_speed: 0.22
     red_min_forward_speed: 0.11
@@ -105,14 +106,14 @@ line_follower_node:
     enable_tjunction_merge: true
     tjunction_merge_direction: -1
     tjunction_arm_yellow_count: 2
-    tjunction_min_arm_dist: 0.65
-    tjunction_min_arm_time: 2.2
+    tjunction_min_arm_dist: 0.55
+    tjunction_min_arm_time: 1.8
     tjunction_min_narrow_frames: 1
-    tjunction_min_full_rows: 25
-    tjunction_merge_speed: 0.13
-    tjunction_merge_yaw: 1.35
-    tjunction_min_duration: 0.85
-    tjunction_max_duration: 2.35
+    tjunction_min_full_rows: 18
+    tjunction_merge_speed: 0.16
+    tjunction_merge_yaw: 1.55
+    tjunction_min_duration: 0.90
+    tjunction_max_duration: 2.50
 
     line_lost_stop_time: 0.8
     line_lost_forward_speed: 0.22
@@ -129,27 +130,25 @@ detection_turn_controller:
     det_frame_width: 640
     det_frame_height: 480
     confidence_threshold: 0.35
-    frame_window: 2
+    frame_window: 3
     turn_cooldown: 1.0
-    turn_duration: 0.52
+    turn_duration: 0.70
     turn_linear: 0.20
-    yaw_gain: 1.85
+    yaw_gain: 2.15
     max_yaw_rate: 1.25
     turn_direction_sign: -1.0
     y_align_tolerance: 0.025
     dual_track_hold_time: 0.30
-    border_margin_x: 0.16
-    border_early_margin: 0.16
+    border_margin_x: 0.14
+    border_early_margin: 0.04
     min_winner_share: 0.50
-    min_winner_count: 2
-    min_turn_x_diff: 0.08
-    enable_inlane_centering: false
-    pair_early_margin: 0.070
-    inlane_yaw_gain: 1.85
-    inlane_turn_linear: 0.22
-    inlane_turn_duration: 1.75
-    inlane_rollover_hold: 0.25
-    inlane_edge_guard: 0.14
+    min_winner_count: 3
+    min_winner_conf: 0.55
+    min_normal_dy_travel: 0.02
+    min_border_obs: 3
+    min_turn_x_diff: 0.06
+    trigger_y_offset: -0.06
+    enable_digit_centering: true
     require_start_signal: true
     line_centroid_topic: "line_follower/centroid"
     centroid_timeout: 0.5
