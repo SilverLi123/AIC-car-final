@@ -31,3 +31,10 @@ temp_view.txt
 /docs/tech_doc_2026aic/
 /HANDOFF.md
 /RDK_X5_模型离线测试步骤.md
+
+# Large intermediate YOLO weights & redundant model builds (keep v3 & v5 .bin tracked)
+yolo/**/*.pt
+yolo/**/*.log
+yolo/v0_orig_11m/
+yolo/v1_yolov8n/
+yolo/v2_yolov8n/

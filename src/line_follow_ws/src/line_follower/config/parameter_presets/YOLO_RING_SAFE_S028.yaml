@@ -1,0 +1,147 @@
+# Ring-map safe 0.28 m/s warm-up preset (system-level architecture v2)
+line_follower_node:
+  ros__parameters:
+    image_topic: "/image_raw"
+    cmd_vel_topic: "/cmd_vel"
+    avoid_cmd_topic: "/cmd_vel_avoid"
+    detection_cmd_topic: "/cmd_vel_detection"
+    debug_image_topic: "line_follower/debug_image"
+    line_state_topic: "line_follower/track_state"
+    start_topic: "line_follower/start_cmd"
+    stop_cmd_topic: "/cmd_vel_stop"
+    line_centroid_topic: "line_follower/centroid"
+
+    target_speed: 0.28
+    max_speed: 0.36
+    min_speed: 0.0
+    max_yaw_rate: 1.55
+    kp: 2.40
+    kd: 0.12
+
+    roi_top_ratio: 0.58
+    roi_bottom_ratio: 0.12
+    gaussian_kernel: 5
+    binary_threshold: 160.0
+    morph_kernel: 3
+    morph_iterations: 2
+    min_contour_area: 2500.0
+    invert_binary: false
+
+    use_white_filter: true
+    white_h_low: 0
+    white_h_high: 180
+    white_s_max: 45
+    white_v_min: 80
+
+    use_yellow_filter: true
+    yellow_h_low: 20
+    yellow_h_high: 40
+    yellow_s_min: 80
+    yellow_v_min: 120
+    yellow_area_ratio_threshold: 0.02
+    yellow_stop_duration: 1.0
+    yellow_permanent_count: 4
+    yellow_clear_frames: 10
+
+    base_far_weight: 0.20
+    enable_intersection_probe: false
+    enable_continuous_curve_assist: true
+    reverse_curve_min_error: 0.12
+    reverse_curve_threshold: 0.35
+    reverse_curve_confirm_frames: 3
+    reverse_curve_clear_frames: 4
+    reverse_curve_speed: 0.16
+    sharp_curve_threshold: 0.38
+    sharp_curve_speed: 0.18
+    enable_curve_preview_steering: false
+
+    enable_red_filter: true
+    red_h_low_1: 0
+    red_h_high_1: 10
+    red_h_low_2: 160
+    red_h_high_2: 180
+    red_s_min: 90
+    red_v_min: 70
+    red_area_ratio_threshold: 0.0035
+    red_divider_angle_deg: 8.0
+    red_vote_frames: 3
+    red_line_aspect_ratio_min: 3.0
+    red_line_min_width_ratio: 0.30
+    red_line_fallback_direction: -1
+    red_line_soft_yaw: 0.35
+    red_line_speed: 0.12
+    red_cone_area_ratio_threshold: 0.0006
+    red_cone_min_bbox_width: 4
+    red_cone_min_bbox_height: 4
+
+    enable_soft_red_avoidance: true
+    red_soft_yaw: 0.22
+    red_repulsion_gain: 1.35
+    red_near_ratio: 0.22
+    red_very_close_ratio: 0.72
+    red_corridor_half_width_ratio: 0.30
+    red_soft_curve_yaw_limit: 0.18
+    red_lane_keep_min_factor: 0.55
+    red_edge_guard_start_error: 0.15
+    red_edge_guard_full_error: 0.32
+    red_edge_guard_min_repulsion: 0.25
+    enable_red_zone_cluster: true
+    red_zone_min_width_ratio: 0.10
+    red_zone_min_pixels: 120
+    red_zone_near_ratio: 0.26
+    red_zone_soft_yaw: 0.24
+    red_latch_clear_frames: 7
+    red_soft_speed: 0.22
+    red_min_forward_speed: 0.11
+
+    enable_passable_gap_red_avoid: false
+    enable_tjunction_merge: false
+
+    line_lost_stop_time: 0.8
+    line_lost_forward_speed: 0.22
+    line_lost_yaw_hold_factor: 0.85
+    speed_gain_damping: 0.65
+    publish_debug_image: true
+
+detection_turn_controller:
+  ros__parameters:
+    detection_topic: "hobot_dnn_detection"
+    state_topic: "line_follower/track_state"
+    start_topic: "line_follower/start_cmd"
+    cmd_vel_topic: "/cmd_vel_detection"
+    det_frame_width: 640
+    det_frame_height: 480
+    confidence_threshold: 0.35
+    frame_window: 3
+    turn_cooldown: 1.0
+    turn_duration: 0.55
+    turn_linear: 0.20
+    yaw_gain: 1.75
+    max_yaw_rate: 1.00
+    turn_direction_sign: -1.0
+    y_align_tolerance: 0.025
+    dual_track_hold_time: 0.30
+    border_margin_x: 0.14
+    border_early_margin: 0.05
+    min_winner_share: 0.50
+    min_winner_count: 3
+    min_winner_conf: 0.55
+    min_normal_dy_travel: 0.02
+    min_border_obs: 4
+    min_turn_x_diff: 0.06
+    trigger_y_offset: 0.0
+    enable_digit_centering: true
+    require_start_signal: true
+    line_centroid_topic: "line_follower/centroid"
+    centroid_timeout: 0.5
+
+cmd_mux_node:
+  ros__parameters:
+    stop_topic: "/cmd_vel_stop"
+    stop_timeout: 0.15
+    avoid_topic: "/cmd_vel_avoid"
+    avoid_timeout: 0.12
+    high_topic: "/cmd_vel_detection"
+    high_timeout: 0.12
+    low_topic: "/cmd_vel_follower"
+    output_topic: "/cmd_vel"

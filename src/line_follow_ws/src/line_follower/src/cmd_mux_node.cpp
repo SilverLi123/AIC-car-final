@@ -13,7 +13,7 @@ public:
     stop_topic_ =
       this->declare_parameter<std::string>("stop_topic", "/cmd_vel_stop");
     stop_timeout_ =
-      this->declare_parameter<double>("stop_timeout", 0.5);
+      this->declare_parameter<double>("stop_timeout", 0.15);
 
     avoid_topic_ =
       this->declare_parameter<std::string>("avoid_topic", "/cmd_vel_avoid");
@@ -23,7 +23,7 @@ public:
     high_topic_ =
       this->declare_parameter<std::string>("high_topic", "/cmd_vel_detection");
     high_timeout_ =
-      this->declare_parameter<double>("high_timeout", 0.5);
+      this->declare_parameter<double>("high_timeout", 0.12);
 
     low_topic_ =
       this->declare_parameter<std::string>("low_topic", "/cmd_vel_follower");
@@ -31,32 +31,45 @@ public:
     output_topic_ =
       this->declare_parameter<std::string>("output_topic", "/cmd_vel");
 
+    // 兼容历史参数文件里残留的 session_cooldown 字段
+    this->declare_parameter<double>("session_cooldown", 2.0);
+
     const auto now = this->now();
     last_stop_time_ = now;
     last_avoid_time_ = now;
     last_high_time_ = now;
 
-    stop_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      stop_topic_, rclcpp::QoS(10),
-      std::bind(&CmdMuxNode::stop_callback, this, std::placeholders::_1));
+    has_stop_ = false;
+    has_avoid_ = false;
+    has_high_ = false;
 
-    avoid_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      avoid_topic_, rclcpp::QoS(10),
-      std::bind(&CmdMuxNode::avoid_callback, this, std::placeholders::_1));
+    stop_sub_ =
+      this->create_subscription<geometry_msgs::msg::Twist>(
+        stop_topic_, rclcpp::QoS(10),
+        std::bind(&CmdMuxNode::stop_callback, this, std::placeholders::_1));
 
-    high_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      high_topic_, rclcpp::QoS(10),
-      std::bind(&CmdMuxNode::high_callback, this, std::placeholders::_1));
+    avoid_sub_ =
+      this->create_subscription<geometry_msgs::msg::Twist>(
+        avoid_topic_, rclcpp::QoS(10),
+        std::bind(&CmdMuxNode::avoid_callback, this, std::placeholders::_1));
 
-    low_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-      low_topic_, rclcpp::QoS(10),
-      std::bind(&CmdMuxNode::low_callback, this, std::placeholders::_1));
+    high_sub_ =
+      this->create_subscription<geometry_msgs::msg::Twist>(
+        high_topic_, rclcpp::QoS(10),
+        std::bind(&CmdMuxNode::high_callback, this, std::placeholders::_1));
 
-    pub_ = this->create_publisher<geometry_msgs::msg::Twist>(output_topic_, 10);
+    low_sub_ =
+      this->create_subscription<geometry_msgs::msg::Twist>(
+        low_topic_, rclcpp::QoS(10),
+        std::bind(&CmdMuxNode::low_callback, this, std::placeholders::_1));
+
+    pub_ =
+      this->create_publisher<geometry_msgs::msg::Twist>(output_topic_, 10);
 
     RCLCPP_INFO(
       get_logger(),
-      "Cmd mux (4-level): stop='%s'(%.2fs) > avoid='%s'(%.2fs) > high='%s'(%.2fs) > low='%s' -> output='%s'",
+      "Cmd mux (4-level): stop='%s'(%.2fs) > avoid='%s'(%.2fs) > high='%s'(%.2fs) > "
+      "low='%s' -> output='%s'",
       stop_topic_.c_str(), stop_timeout_,
       avoid_topic_.c_str(), avoid_timeout_,
       high_topic_.c_str(), high_timeout_,
@@ -79,63 +92,74 @@ private:
     return has_high_ && (now - last_high_time_).seconds() <= high_timeout_;
   }
 
+  // 第一优先级：黄线停车 / 反向制动 / 暂停零速
   void stop_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
     last_stop_msg_ = *msg;
     last_stop_time_ = this->now();
     has_stop_ = true;
-    publish_msg(*msg);
+    publish(msg);
   }
 
+  // 第二优先级：近距红障避让 / T-merge 安全接管（由 line_follower_node 内部统一仲裁后发出）
   void avoid_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
     const auto now = this->now();
     if (stop_active(now)) {
-      publish_msg(last_stop_msg_);
+      publish_value(last_stop_msg_);
       return;
     }
     last_avoid_msg_ = *msg;
     last_avoid_time_ = now;
     has_avoid_ = true;
-    publish_msg(*msg);
+    publish(msg);
   }
 
+  // 第三优先级：YOLO 数字选路转向
   void high_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
     const auto now = this->now();
     if (stop_active(now)) {
-      publish_msg(last_stop_msg_);
+      publish_value(last_stop_msg_);
       return;
     }
     if (avoid_active(now)) {
-      publish_msg(last_avoid_msg_);
+      publish_value(last_avoid_msg_);
       return;
     }
     last_high_msg_ = *msg;
     last_high_time_ = now;
     has_high_ = true;
-    publish_msg(*msg);
+    publish(msg);
   }
 
+  // 第四优先级：普通巡线
   void low_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
     const auto now = this->now();
     if (stop_active(now)) {
-      publish_msg(last_stop_msg_);
+      publish_value(last_stop_msg_);
       return;
     }
     if (avoid_active(now)) {
-      publish_msg(last_avoid_msg_);
+      publish_value(last_avoid_msg_);
       return;
     }
     if (high_active(now)) {
-      publish_msg(last_high_msg_);
+      publish_value(last_high_msg_);
       return;
     }
-    publish_msg(*msg);
+    publish(msg);
   }
 
-  void publish_msg(const geometry_msgs::msg::Twist & msg)
+  void publish(const geometry_msgs::msg::Twist::SharedPtr & msg)
+  {
+    if (pub_ && msg) {
+      pub_->publish(*msg);
+    }
+  }
+
+  void publish_value(const geometry_msgs::msg::Twist & msg)
   {
     if (pub_) {
       pub_->publish(msg);
@@ -148,9 +172,9 @@ private:
   std::string low_topic_;
   std::string output_topic_;
 
-  double stop_timeout_{0.5};
+  double stop_timeout_{0.15};
   double avoid_timeout_{0.12};
-  double high_timeout_{0.5};
+  double high_timeout_{0.12};
 
   rclcpp::Time last_stop_time_;
   rclcpp::Time last_avoid_time_;

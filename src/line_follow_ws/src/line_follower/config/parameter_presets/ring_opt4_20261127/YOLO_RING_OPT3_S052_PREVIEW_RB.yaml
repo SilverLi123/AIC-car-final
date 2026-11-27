@@ -113,6 +113,7 @@ line_follower_node:
     red_roi_top_ratio: 0.45
     red_avoid_max_yaw_rate: 1.25
 
+    enable_passable_gap_red_avoid: false
     enable_tjunction_merge: false
 
     line_lost_stop_time: 0.8

@@ -96,6 +96,7 @@ line_follower_node:
     red_soft_speed: 0.22
     red_min_forward_speed: 0.11
 
+    enable_passable_gap_red_avoid: true
     enable_tjunction_merge: true
     tjunction_merge_direction: -1
     tjunction_arm_yellow_count: 2

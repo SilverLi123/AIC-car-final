@@ -176,12 +176,15 @@ discover_yolo_models() {
   local search_globs=(
     "$YOLO_DIR/mod1"
     "$YOLO_DIR"
+    "$ROOT/yolo"
     "$ROOT/models"
     "$HOME"
   )
   local dir
   for dir in "${search_globs[@]}"; do
     [[ -d "$dir" ]] || continue
+    local depth=1
+    [[ "$dir" == "$ROOT/yolo" ]] && depth=2
     while IFS= read -r file; do
       [[ -f "$file" ]] || continue
       if [[ "$dir" == "$HOME" ]]; then
@@ -205,7 +208,7 @@ discover_yolo_models() {
         seen_paths+=("$real_p")
         candidates+=("$real_p")
       fi
-    done < <(find "$dir" -maxdepth 1 -type f -name '*.bin' 2>/dev/null | sort)
+    done < <(find "$dir" -maxdepth "$depth" -type f -name '*.bin' 2>/dev/null | sort)
   done
 
   if ((${#candidates[@]})); then
@@ -411,6 +414,8 @@ preset_priority_rank() {
   local base
   base="$(basename "$1")"
   case "$base" in
+    YOLO_RING_BASE.yaml|YOLO_FORK_BASE.yaml) printf '01\n' ;;
+    YOLO_RING_SAFE_*) printf '03\n' ;;
     YOLO_FORK_EXP*) printf '05\n' ;;
     YOLO_RING_OPT4_*|YOLO_FORK_OPT4_*) printf '10\n' ;;
     YOLO_RING_OPT3_*|YOLO_FORK_OPT3_*) printf '20\n' ;;
@@ -425,13 +430,15 @@ preset_tag_label() {
   local base
   base="$(basename "$1")"
   case "$base" in
-    YOLO_FORK_EXP*) printf '[Fork 实验] ' ;;
-    YOLO_RING_OPT4_*) printf '[OPT4 环岛] ' ;;
-    YOLO_FORK_OPT4_*) printf '[OPT4 岔路] ' ;;
-    YOLO_RING_OPT3_*) printf '[OPT3 基线] ' ;;
-    line_follower_params.yaml) printf '[原版默认] ' ;;
-    EXP_*) printf '[实验功能] ' ;;
-    RB_*reverse*.yaml|RB_S*.yaml) printf '[Reverse]   ' ;;
+    YOLO_RING_BASE.yaml|YOLO_FORK_BASE.yaml) printf '[默认推荐基线] ' ;;
+    YOLO_RING_SAFE_*) printf '[稳健热身]     ' ;;
+    YOLO_FORK_EXP*) printf '[Fork 进阶]    ' ;;
+    YOLO_RING_OPT4_*) printf '[OPT4 环岛]    ' ;;
+    YOLO_FORK_OPT4_*) printf '[OPT4 岔路]    ' ;;
+    YOLO_RING_OPT3_*) printf '[OPT3 环岛]    ' ;;
+    line_follower_params.yaml) printf '[原版默认]     ' ;;
+    EXP_*) printf '[实验功能]     ' ;;
+    RB_*reverse*.yaml|RB_S*.yaml) printf '[Reverse]      ' ;;
     *) printf '' ;;
   esac
 }

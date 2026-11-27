@@ -115,6 +115,7 @@ line_follower_node:
     red_avoid_max_lat_accel: 0.34
     red_avoid_highspeed_slew_ref_speed: 0.30
 
+    enable_passable_gap_red_avoid: false
     enable_tjunction_merge: false
 
     line_lost_stop_time: 0.8

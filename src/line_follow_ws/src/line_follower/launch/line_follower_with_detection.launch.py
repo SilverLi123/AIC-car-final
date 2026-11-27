@@ -26,6 +26,11 @@ def generate_launch_description():
         default_value="/cmd_vel_follower",
         description="巡线节点输出话题",
     )
+    avoid_cmd_arg = DeclareLaunchArgument(
+        "avoid_cmd_topic",
+        default_value="/cmd_vel_avoid",
+        description="避障接管输出话题（次高优先级）",
+    )
     detection_cmd_arg = DeclareLaunchArgument(
         "detection_cmd_topic",
         default_value="/cmd_vel_detection",
@@ -55,6 +60,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration("image_topic")
     cmd_vel_topic = LaunchConfiguration("cmd_vel_topic")
     follower_cmd_topic = LaunchConfiguration("follower_cmd_topic")
+    avoid_cmd_topic = LaunchConfiguration("avoid_cmd_topic")
     detection_cmd_topic = LaunchConfiguration("detection_cmd_topic")
     stop_cmd_topic = LaunchConfiguration("stop_cmd_topic")
     params_file = LaunchConfiguration("params_file")
@@ -71,6 +77,8 @@ def generate_launch_description():
         {
             "image_topic": image_topic,
             "cmd_vel_topic": follower_cmd_topic,
+            "avoid_cmd_topic": avoid_cmd_topic,
+            "detection_cmd_topic": detection_cmd_topic,
             "stop_cmd_topic": stop_cmd_topic,
          },
      ],
@@ -100,6 +108,7 @@ def generate_launch_description():
             params_file,
             {
                 "stop_topic": stop_cmd_topic,
+                "avoid_topic": avoid_cmd_topic,
                 "high_topic": detection_cmd_topic,
                 "low_topic": follower_cmd_topic,
                 "output_topic": cmd_vel_topic,
@@ -111,6 +120,7 @@ def generate_launch_description():
         image_topic_arg,
         cmd_vel_topic_arg,
         follower_cmd_arg,
+        avoid_cmd_arg,
         detection_cmd_arg,
         stop_cmd_arg,
         params_arg,
