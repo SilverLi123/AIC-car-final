@@ -411,6 +411,7 @@ preset_priority_rank() {
   local base
   base="$(basename "$1")"
   case "$base" in
+    YOLO_FORK_EXP*) printf '05\n' ;;
     YOLO_RING_OPT4_*|YOLO_FORK_OPT4_*) printf '10\n' ;;
     YOLO_RING_OPT3_*|YOLO_FORK_OPT3_*) printf '20\n' ;;
     YOLO_*) printf '30\n' ;;
@@ -424,6 +425,7 @@ preset_tag_label() {
   local base
   base="$(basename "$1")"
   case "$base" in
+    YOLO_FORK_EXP*) printf '[Fork 实验] ' ;;
     YOLO_RING_OPT4_*) printf '[OPT4 环岛] ' ;;
     YOLO_FORK_OPT4_*) printf '[OPT4 岔路] ' ;;
     YOLO_RING_OPT3_*) printf '[OPT3 基线] ' ;;
