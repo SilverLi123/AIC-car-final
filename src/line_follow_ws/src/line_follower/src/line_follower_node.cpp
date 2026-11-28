@@ -64,6 +64,8 @@ struct RedAvoidRuntime
   double gap_right_l{0.0};
   double gap_right_r{0.0};
   double w_right_px{0.0};
+  bool dead_end_decided{false};
+  int dead_end_dir{0};
 };
 
 RedAvoidRuntime g_red_avoid;
@@ -101,6 +103,11 @@ LineFollowerNode::LineFollowerNode()
   yellow_line_latched_ = false;
   yellow_clear_frames_ = 0;
   permanent_stop_ = false;
+  visual_finish_pre_hits_ = 0;
+  visual_finish_confirm_frames_ = 0;
+  visual_finish_window_active_ = false;
+  visual_finish_window_start_dist_ = 0.0;
+  visual_finish_window_start_time_ = this->now();
   start_enabled_ = false;
   red_left_votes_ = 0;
   red_right_votes_ = 0;
@@ -193,6 +200,14 @@ void LineFollowerNode::declare_parameters()
   this->declare_parameter("yellow_stop_duration", 1.0);
   this->declare_parameter("yellow_permanent_count", 5);
   this->declare_parameter("yellow_clear_frames", 10);
+  this->declare_parameter("enable_visual_finish_stop", false);
+  this->declare_parameter("finish_black_bar_min_cov", 0.52);
+  this->declare_parameter("finish_end_blue_min_ratio", 0.45);
+  this->declare_parameter("finish_end_min_blobs", 2);
+  this->declare_parameter("finish_end_min_transitions", 6);
+  this->declare_parameter("finish_confirm_frames", 3);
+  this->declare_parameter("finish_post_yellow_dist", 1.0);
+  this->declare_parameter("finish_post_yellow_sec", 3.0);
   this->declare_parameter("enable_reverse_brake", false);
   this->declare_parameter("odom_topic", "/odom");
   this->declare_parameter("reverse_speed", 0.0);
@@ -388,6 +403,21 @@ void LineFollowerNode::declare_parameters()
     1, static_cast<int>(this->get_parameter("yellow_permanent_count").as_int()));
   yellow_clear_frames_required_ = std::max<int>(
     1, static_cast<int>(this->get_parameter("yellow_clear_frames").as_int()));
+  enable_visual_finish_stop_ = this->get_parameter("enable_visual_finish_stop").as_bool();
+  finish_black_bar_min_cov_ = clamp(
+    this->get_parameter("finish_black_bar_min_cov").as_double(), 0.25, 0.95);
+  finish_end_blue_min_ratio_ = clamp(
+    this->get_parameter("finish_end_blue_min_ratio").as_double(), 0.20, 0.90);
+  finish_end_min_blobs_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("finish_end_min_blobs").as_int()));
+  finish_end_min_transitions_ = std::max<int>(
+    2, static_cast<int>(this->get_parameter("finish_end_min_transitions").as_int()));
+  finish_confirm_frames_ = std::max<int>(
+    1, static_cast<int>(this->get_parameter("finish_confirm_frames").as_int()));
+  finish_post_yellow_dist_ = std::max(
+    0.10, this->get_parameter("finish_post_yellow_dist").as_double());
+  finish_post_yellow_sec_ = std::max(
+    0.30, this->get_parameter("finish_post_yellow_sec").as_double());
   reverse_brake_enabled_ = this->get_parameter("enable_reverse_brake").as_bool();
   odom_topic_ = this->get_parameter("odom_topic").as_string();
   reverse_speed_ = this->get_parameter("reverse_speed").as_double();
@@ -520,6 +550,11 @@ void LineFollowerNode::start_callback(const std_msgs::msg::Bool::SharedPtr msg)
     yellow_line_latched_ = false;
     yellow_clear_frames_ = 0;
     permanent_stop_ = false;
+    visual_finish_pre_hits_ = 0;
+    visual_finish_confirm_frames_ = 0;
+    visual_finish_window_active_ = false;
+    visual_finish_window_start_dist_ = odom_total_dist_m_;
+    visual_finish_window_start_time_ = this->now();
     reverse_brake_active_ = false;
     yellow_line_detection_time_ = this->now();
 
@@ -774,10 +809,17 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
          g_red_avoid.w_right_px >= g_red_avoid.w_left_px + 60.0) ||
         (red_committed_dir_ < 0 && g_red_avoid.w_right_px < 35.0 &&
          g_red_avoid.w_left_px >= g_red_avoid.w_right_px + 60.0));
+      const bool stale_dead_end_latch =
+        !passable_gap_enabled &&
+        g_red_avoid.dead_end_decided &&
+        (g_red_avoid.dead_end_dir != 0) &&
+        (red_committed_dir_ != 0) &&
+        (g_red_avoid.dead_end_dir != red_committed_dir_);
       const bool stale_opposite_latch =
         (red_committed_dir_ > 0 && box_right_x < road_cx + 15.0) ||
         (red_committed_dir_ < 0 && box_left_x > road_cx - 15.0) ||
-        stale_gap_latch;
+        stale_gap_latch ||
+        stale_dead_end_latch;
       const bool zone_type_switched =
         (!passable_gap_enabled && red_enable_intrusion_scaling) ?
         (!red_latch_is_zone_ && g_red_avoid.is_red_zone) :
@@ -973,6 +1015,10 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
       yellow_line_latched_ = true;
       yellow_line_detection_count_++;
       yellow_line_detection_time_ = now;
+      visual_finish_confirm_frames_ =
+        std::min(visual_finish_pre_hits_, std::max(0, finish_confirm_frames_ - 1));
+      visual_finish_pre_hits_ = 0;
+      visual_finish_window_active_ = false;
 
       reverse_brake_active_ = false;
       if (reverse_brake_enabled_) {
@@ -1039,6 +1085,79 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
     (now - yellow_line_detection_time_).seconds();
 
   // ============================================================
+  // 可选两层终点视觉判停（不依赖固定黄线条数）：
+  // 第1层：黄线后紧接全宽横向黑线；第2层：黑线紧上方蓝底白字 END（连通块 + 笔画跳变）。
+  // 严格由黄线门控：在黄线临停全周期 [0.0s, yellow_stop_duration_) 及起步后
+  // finish_post_yellow_dist_（无 odom 时 finish_post_yellow_sec_）兜底窗口内生效。
+  // ============================================================
+  if (enable_visual_finish_stop_ && !permanent_stop_ && result_opt) {
+    const bool finish_frame_match = result_opt->visual_finish_detected;
+
+    const bool in_stage1_stop =
+      yellow_line_stop_active_ &&
+      since_yellow_detection >= 0.0 &&
+      since_yellow_detection < yellow_stop_duration_;
+
+    bool in_stage2_post = false;
+    if (visual_finish_window_active_) {
+      const double post_time = (now - visual_finish_window_start_time_).seconds();
+      const double max_time_cap = std::max(finish_post_yellow_sec_, 5.0);
+      if (post_time > max_time_cap) {
+        visual_finish_window_active_ = false;
+        visual_finish_confirm_frames_ = 0;
+      } else if (odom_received_) {
+        const double post_dist = odom_total_dist_m_ - visual_finish_window_start_dist_;
+        if (post_dist <= finish_post_yellow_dist_) {
+          in_stage2_post = true;
+        } else {
+          visual_finish_window_active_ = false;
+          visual_finish_confirm_frames_ = 0;
+        }
+      } else {
+        if (post_time <= finish_post_yellow_sec_) {
+          in_stage2_post = true;
+        } else {
+          visual_finish_window_active_ = false;
+          visual_finish_confirm_frames_ = 0;
+        }
+      }
+    }
+
+    if (in_stage1_stop || in_stage2_post) {
+      if (finish_frame_match) {
+        visual_finish_confirm_frames_++;
+        if (visual_finish_confirm_frames_ >= finish_confirm_frames_) {
+          permanent_stop_ = true;
+          yellow_line_stop_active_ = false;
+          visual_finish_window_active_ = false;
+          RCLCPP_INFO(
+            this->get_logger(),
+            "Final yellow line detected. Permanent stop activated. "
+            "(2-layer finish %s: blk=%.2f, end_B=%.2f, blobs=%d, tr=%d, frames=%d)",
+            in_stage1_stop ? "stage1-stop" : "stage2-post",
+            result_opt->finish_black_cov,
+            result_opt->finish_end_blue_ratio,
+            result_opt->finish_end_blobs,
+            result_opt->finish_end_transitions,
+            visual_finish_confirm_frames_);
+        }
+      } else {
+        visual_finish_confirm_frames_ = 0;
+      }
+    } else {
+      visual_finish_confirm_frames_ = 0;
+      // 接近终点黄线前若已连续看到“黄线+黑线+END”，预累积最多 (confirm-1) 帧，
+      // 严禁在未触发黄线前单独停住，仅用于黄线触发瞬间快速确认。
+      if (finish_frame_match) {
+        visual_finish_pre_hits_ = std::min(
+          visual_finish_pre_hits_ + 1, std::max(0, finish_confirm_frames_ - 1));
+      } else {
+        visual_finish_pre_hits_ = 0;
+      }
+    }
+  }
+
+  // ============================================================
   // 交叉口探针
   // ============================================================
   if (enable_intersection_probe_ && result_opt && result_opt->line_detected &&
@@ -1092,6 +1211,12 @@ void LineFollowerNode::image_callback(const sensor_msgs::msg::Image::ConstShared
         since_yellow_detection >= yellow_stop_duration_)
     {
       yellow_line_stop_active_ = false;
+      if (enable_visual_finish_stop_) {
+        visual_finish_window_active_ = true;
+        visual_finish_window_start_dist_ = odom_total_dist_m_;
+        visual_finish_window_start_time_ = now;
+        visual_finish_confirm_frames_ = 0;
+      }
       RCLCPP_INFO(
         this->get_logger(),
         "Yellow line stop duration ended. Resuming line following.");
@@ -1860,6 +1985,153 @@ std::optional<ProcessingResult> LineFollowerNode::process_image(
   result.red_mask_raw = red_mask_raw;
   result.roi_top = roi_rect.y;
   result.roi_bottom = roi_rect.y + roi_rect.height;
+  if (enable_visual_finish_stop_ && height > 40 && width > 40) {
+    // 2-layer finish detector on lower frame [0.38H .. H], center road strip [0.22W .. 0.78W]:
+    // Layer 1: horizontal closing black bar immediately above yellow line (or near frame bottom).
+    // Layer 2: contiguous blue END mat immediately above black bar containing white letter blobs.
+    const int fy0 = std::clamp(static_cast<int>(height * 0.38), 0, height - 2);
+    const int fx0 = std::clamp(static_cast<int>(width * 0.22), 0, width - 2);
+    const int fx1 = std::clamp(static_cast<int>(width * 0.78), fx0 + 1, width);
+    const int cw = fx1 - fx0;
+    const int fh = height - fy0;
+
+    cv::Mat f_hsv;
+    cv::cvtColor(frame_bgr(cv::Rect(fx0, fy0, cw, fh)), f_hsv, cv::COLOR_BGR2HSV);
+
+    cv::Mat f_yel, f_blk, f_blu, f_wht;
+    cv::inRange(
+      f_hsv,
+      cv::Scalar(static_cast<double>(yellow_h_low_), static_cast<double>(yellow_s_min_), static_cast<double>(yellow_v_min_)),
+      cv::Scalar(static_cast<double>(yellow_h_high_), 255.0, 255.0),
+      f_yel);
+    cv::inRange(f_hsv, cv::Scalar(0.0, 0.0, 0.0), cv::Scalar(180.0, 95.0, 110.0), f_blk);
+    cv::inRange(f_hsv, cv::Scalar(90.0, 65.0, 45.0), cv::Scalar(135.0, 255.0, 255.0), f_blu);
+    cv::inRange(f_hsv, cv::Scalar(0.0, 0.0, 100.0), cv::Scalar(180.0, 55.0, 255.0), f_wht);
+
+    // Find top row of horizontal yellow line in [0.42H .. 0.98H]
+    const int yel_s0 = std::clamp(static_cast<int>(height * 0.42) - fy0, 0, fh - 1);
+    const int yel_s1 = std::clamp(static_cast<int>(height * 0.98) - fy0, yel_s0 + 1, fh);
+    const int yel_min_cols = std::max(1, static_cast<int>(cw * 0.25));
+    int y_yel_top = -1;
+    for (int y = yel_s0; y < yel_s1; ++y) {
+      if (cv::countNonZero(f_yel.row(y)) >= yel_min_cols) {
+        y_yel_top = y;
+        break;
+      }
+    }
+
+    // Layer 1: horizontal black bar search window
+    int b_s0 = 0;
+    int b_s1 = fh;
+    if (y_yel_top >= 0) {
+      b_s0 = std::max(static_cast<int>(height * 0.45) - fy0, y_yel_top - 85);
+      b_s1 = std::max(b_s0 + 1, y_yel_top - 1);
+    } else {
+      b_s0 = std::clamp(static_cast<int>(height * 0.65) - fy0, 0, fh - 1);
+      b_s1 = fh;
+    }
+    b_s0 = std::clamp(b_s0, 0, fh - 1);
+    b_s1 = std::clamp(b_s1, b_s0 + 1, fh);
+
+    int blk_hits = 0;
+    int y_blk_top = -1;
+    double max_blk_cov = 0.0;
+    for (int y = b_s0; y < b_s1; ++y) {
+      const double cov = static_cast<double>(cv::countNonZero(f_blk.row(y))) / static_cast<double>(cw);
+      if (cov > max_blk_cov) {
+        max_blk_cov = cov;
+      }
+      if (cov >= finish_black_bar_min_cov_) {
+        if (y_blk_top < 0) {
+          y_blk_top = y;
+        }
+        blk_hits++;
+      }
+    }
+    result.finish_black_cov = max_blk_cov;
+
+    // Layer 2: contiguous blue END mat + enclosed white letter blobs directly above black bar
+    const int min_e1 = std::max(4, static_cast<int>(height * 0.42) - fy0);
+    if (blk_hits >= 2 && y_blk_top - 2 > min_e1) {
+      const int e1 = y_blk_top - 2;
+      const int y_lim = std::max(0, e1 - 140);
+      int e0 = e1;
+      int miss = 0;
+      for (int y = e1 - 1; y >= y_lim; --y) {
+        const double bcov =
+          static_cast<double>(cv::countNonZero(f_blu.row(y))) / static_cast<double>(cw);
+        if (bcov >= 0.35) {
+          e0 = y;
+          miss = 0;
+        } else {
+          miss++;
+          if (miss >= 3) {
+            break;
+          }
+        }
+      }
+      const int eh = e1 - e0;
+      if (eh >= 12) {
+        const cv::Mat eblu = f_blu(cv::Rect(0, e0, cw, eh));
+        const cv::Mat ewht = f_wht(cv::Rect(0, e0, cw, eh));
+        const double band_area = std::max(1.0, static_cast<double>(eh * cw));
+        const double e_blu = static_cast<double>(cv::countNonZero(eblu)) / band_area;
+        const double e_wht = static_cast<double>(cv::countNonZero(ewht)) / band_area;
+        result.finish_end_blue_ratio = e_blu;
+
+        if (e_blu >= finish_end_blue_min_ratio_ && e_wht <= 0.45) {
+          cv::Mat labels, stats, centroids;
+          const int num_lbl = cv::connectedComponentsWithStats(ewht, labels, stats, centroids, 8);
+          int blobs = 0;
+          const int min_bh = std::max(4, static_cast<int>(eh * 0.14));
+          for (int k = 1; k < num_lbl; ++k) {
+            const int bx = stats.at<int>(k, cv::CC_STAT_LEFT);
+            const int by = stats.at<int>(k, cv::CC_STAT_TOP);
+            const int bw = stats.at<int>(k, cv::CC_STAT_WIDTH);
+            const int bh = stats.at<int>(k, cv::CC_STAT_HEIGHT);
+            const int area = stats.at<int>(k, cv::CC_STAT_AREA);
+            if (area < 20 || static_cast<double>(area) > 0.35 * band_area) {
+              continue;
+            }
+            if (static_cast<double>(bw) > 0.45 * static_cast<double>(cw) || bh < min_bh) {
+              continue;
+            }
+            const int px0 = std::max(0, bx - 6);
+            const int py0 = std::max(0, by - 4);
+            const int px1 = std::min(cw, bx + bw + 6);
+            const int py1 = std::min(eh, by + bh + 4);
+            const cv::Mat ring = eblu(cv::Rect(px0, py0, px1 - px0, py1 - py0));
+            const double ring_denom = std::max(1.0, static_cast<double>(ring.total()) - static_cast<double>(area));
+            const double ring_blue = static_cast<double>(cv::countNonZero(ring)) / ring_denom;
+            if (ring_blue >= 0.35) {
+              blobs++;
+            }
+          }
+
+          int max_trans = 0;
+          const int r0 = std::max(0, static_cast<int>(eh * 0.15));
+          const int r1 = std::min(eh, static_cast<int>(eh * 0.85));
+          for (int r = r0; r < r1; ++r) {
+            const unsigned char * ptr = ewht.ptr<unsigned char>(r);
+            int tr = 0;
+            for (int c = 1; c < cw; ++c) {
+              if ((ptr[c] != 0) != (ptr[c - 1] != 0)) {
+                tr++;
+              }
+            }
+            if (tr > max_trans) {
+              max_trans = tr;
+            }
+          }
+
+          result.finish_end_blobs = blobs;
+          result.finish_end_transitions = max_trans;
+          result.visual_finish_detected =
+            (blobs >= finish_end_min_blobs_) && (max_trans >= finish_end_min_transitions_);
+        }
+      }
+    }
+  }
 
   // ============================================================
   // 6. 最大轮廓只做存在性判断 / fallback / debug
@@ -2660,18 +2932,20 @@ bool LineFollowerNode::detect_red(
     }
   } else {
     // Ring mode: 17:05 + OPT3 one_side_dead_end outer-cone clearance protection.
+    // Sample the ground-contact base strip (~20 px) on road_mask instead of the full cone height,
+    // so tall cones reaching the top of ROI are not polluted by background white walls/floors.
     bool clearance_decided = false;
     double left_clear = -1.0;
     double right_clear = -1.0;
-    if (!result.road_mask.empty()) {
+    int road_l = -1;
+    int road_r = -1;
+    const int base_y = box.y + box.height - ext_h;
+    if (!result.road_mask.empty() && base_y > 4) {
       const int road_h = std::max(1, result.road_mask.rows);
-      const int oy0 = std::clamp(box.y - ext_h, 0, road_h - 1);
-      const int oy1 = std::clamp(
-        std::max(box.y + box.height - ext_h, oy0 + 12), oy0 + 1, road_h);
+      const int oy1 = std::clamp(base_y, 1, road_h);
+      const int oy0 = std::clamp(oy1 - 20, 0, oy1 - 1);
       const cv::Mat oband = result.road_mask(cv::Rect(0, oy0, roi_w, oy1 - oy0));
-      const int min_px = std::max(1, static_cast<int>(static_cast<double>(oband.rows) * 0.25));
-      int road_l = -1;
-      int road_r = -1;
+      const int min_px = std::max(1, static_cast<int>(static_cast<double>(oband.rows) * 0.30));
       for (int x = 0; x < roi_w; ++x) {
         if (cv::countNonZero(oband.col(x)) >= min_px) {
           if (road_l < 0) {
@@ -2686,15 +2960,29 @@ bool LineFollowerNode::detect_red(
       }
     }
 
-    const bool one_side_dead_end =
+    // Only treat a narrow side clearance as a true dead end when that road boundary
+    // is visible inside the camera frame (not cut off at x=0 or x=roi_w-1 on sharp curves).
+    const bool left_bounded = (road_l > 6) && (box.x > 6);
+    const bool right_bounded =
+      (road_r >= 0) && (road_r < roi_w - 7) && ((box.x + box.width) < roi_w - 6);
+    const bool left_dead =
+      left_bounded &&
       (left_clear >= 0.0 && right_clear >= 0.0) &&
-      (std::min(left_clear, right_clear) < 35.0) &&
-      (std::max(left_clear, right_clear) >= std::max(60.0, 2.5 * std::min(left_clear, right_clear)));
+      (left_clear < 35.0) &&
+      (right_clear >= std::max(60.0, 2.5 * left_clear));
+    const bool right_dead =
+      right_bounded &&
+      (left_clear >= 0.0 && right_clear >= 0.0) &&
+      (right_clear < 35.0) &&
+      (left_clear >= std::max(60.0, 2.5 * right_clear));
+    const bool one_side_dead_end = left_dead || right_dead;
 
     if (one_side_dead_end) {
       side_sign = (right_clear > left_clear) ? -1.0 : 1.0;
       clearance_decided = true;
-    } else if (use_red_line || std::abs(signed_lat_px) < 25.0) {
+      g_red_avoid.dead_end_decided = true;
+      g_red_avoid.dead_end_dir = (side_sign < 0.0) ? -1 : 1;
+    } else if (use_red_line || (std::abs(signed_lat_px) < 25.0 && left_bounded && right_bounded)) {
       if (left_clear >= 0.0 && right_clear >= 0.0 && std::abs(right_clear - left_clear) >= 16.0) {
         side_sign = (right_clear > left_clear) ? -1.0 : 1.0;
         clearance_decided = true;

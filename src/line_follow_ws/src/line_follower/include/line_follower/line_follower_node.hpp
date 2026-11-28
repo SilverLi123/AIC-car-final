@@ -51,6 +51,11 @@ struct ProcessingResult
 
   int roi_top{0};
   int roi_bottom{0};
+  bool visual_finish_detected{false};
+  double finish_black_cov{0.0};
+  double finish_end_blue_ratio{0.0};
+  int finish_end_blobs{0};
+  int finish_end_transitions{0};
 };
 
 class LineFollowerNode : public rclcpp::Node
@@ -184,6 +189,23 @@ private:
   int yellow_line_detection_count_{0};
   bool permanent_stop_{false};
   rclcpp::Time yellow_line_detection_time_;
+
+  // Optional 2-layer visual finish-zone permanent stop:
+  // Layer 1: horizontal closing black bar immediately behind yellow line
+  // Layer 2: blue END zone with white letter blobs + stroke transitions immediately behind black bar
+  bool enable_visual_finish_stop_{false};
+  double finish_black_bar_min_cov_{0.52};
+  double finish_end_blue_min_ratio_{0.45};
+  int finish_end_min_blobs_{2};
+  int finish_end_min_transitions_{6};
+  int finish_confirm_frames_{3};
+  double finish_post_yellow_dist_{1.0};
+  double finish_post_yellow_sec_{3.0};
+  int visual_finish_pre_hits_{0};
+  int visual_finish_confirm_frames_{0};
+  bool visual_finish_window_active_{false};
+  double visual_finish_window_start_dist_{0.0};
+  rclcpp::Time visual_finish_window_start_time_;
 
   // ============================================================
   // Intersection probe

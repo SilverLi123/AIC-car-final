@@ -73,6 +73,8 @@ public:
     trigger_y_offset_ = std::clamp(this->declare_parameter<double>("trigger_y_offset", 0.0), -0.30, 0.30);
     // 兼容 16:28 v2 YAML 中的 enable_digit_centering 字段；与 enable_inlane_centering 严格解耦。
     enable_digit_centering_ = this->declare_parameter<bool>("enable_digit_centering", true);
+    // 可选：接管转向时以车头中心 0.50 作为横向参考点，避免弯道减掉 road centroid 导致转向不足。
+    use_image_center_ref_ = this->declare_parameter<bool>("use_image_center_ref", false);
     // 仅用于直道/车道内并排数字的闭环居中压数字实验；默认关闭，避免干扰正常开环转向。
     enable_inlane_centering_ = this->declare_parameter<bool>("enable_inlane_centering", false);
     pair_early_margin_ = std::clamp(this->declare_parameter<double>("pair_early_margin", 0.070), 0.0, 0.14);
@@ -661,7 +663,7 @@ private:
       !winner.border_ready &&
       (ready_count >= 2) &&
       (std::abs(winner.cx - 0.50) <= 0.28);
-    const double ref_x = use_inlane_centering ? 0.50 : last_centroid_norm_x_;
+    const double ref_x = (use_inlane_centering || use_image_center_ref_) ? 0.50 : last_centroid_norm_x_;
     const double eff_gain = use_inlane_centering ? inlane_yaw_gain_ : yaw_gain_;
     const double eff_lin = use_inlane_centering ? inlane_turn_linear_ : turn_linear_;
     const double eff_dur = use_inlane_centering ? inlane_turn_duration_ : turn_duration_;
@@ -750,6 +752,7 @@ private:
   double min_turn_x_diff_{0.08};
   double trigger_y_offset_{0.0};
   bool enable_digit_centering_{true};
+  bool use_image_center_ref_{false};
   bool enable_inlane_centering_{false};
   double pair_early_margin_{0.070};
   double inlane_yaw_gain_{3.60};
